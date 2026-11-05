@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define CONFIG_VERSION      1
+#define CONFIG_VERSION      2
 #define CFG_PRESET_COUNT    4   /* sit, stand, custom1, custom2 (same order as motion_preset_t) */
 
 typedef struct {
@@ -52,6 +52,9 @@ typedef struct {
     uint8_t admin_hash[32];
     bool admin_set;
     bool admin_prompt_dismissed;
+
+    /* --- v2 --- (new fields go at the end so older blobs load as a prefix) */
+    char ntp_server[64];       /* empty = automatic (DHCP-provided, then the gateway) */
 } desk_config_t;
 
 typedef void (*config_listener_t)(const desk_config_t *cfg);

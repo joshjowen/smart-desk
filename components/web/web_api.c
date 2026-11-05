@@ -269,6 +269,7 @@ static cJSON *config_json(const desk_config_t *c)
     cJSON_AddStringToObject(w, "ssid", c->wifi_ssid);
     cJSON_AddBoolToObject(w, "password_set", c->wifi_pass[0] != 0);
     cJSON_AddStringToObject(o, "hostname", c->hostname);
+    cJSON_AddStringToObject(o, "ntp_server", c->ntp_server);
     cJSON *ps = cJSON_AddArrayToObject(o, "presets");
     for (int i = 0; i < CFG_PRESET_COUNT; i++) {
         cJSON *p = cJSON_CreateObject();
@@ -345,6 +346,7 @@ static bool merge_config(const cJSON *o, desk_config_t *c, char *err, size_t el)
         if (!take_str(w, "password", c->wifi_pass, sizeof(c->wifi_pass), "Wi-Fi password", err, el)) return false;
     }
     if (!take_str(o, "hostname", c->hostname, sizeof(c->hostname), "Hostname", err, el)) return false;
+    if (!take_str(o, "ntp_server", c->ntp_server, sizeof(c->ntp_server), "Time server", err, el)) return false;
 
     const cJSON *ps = cJSON_GetObjectItem(o, "presets");
     if (ps) {

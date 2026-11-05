@@ -7,6 +7,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include <time.h>
+#include "esp_sntp.h"
 #include "board.h"
 #include "motion.h"
 
@@ -40,6 +42,20 @@ static int cmd_goto(int argc, char **argv)
     }
     motion_req_t r = { .type = MOTION_REQ_GOTO_HEIGHT, .source = MOTION_SRC_SYSTEM, .value = atoi(argv[1]) };
     motion_request(&r);
+    return 0;
+}
+
+static int cmd_time(int argc, char **argv)
+{
+    time_t now = time(NULL);
+    printf("time %lld (%s)", (long long)now, ctime(&now));
+    for (int i = 0; i < SNTP_MAX_SERVERS; i++) {
+        const char *name = esp_sntp_getservername(i);
+        const ip_addr_t *ip = esp_sntp_getserver(i);
+        printf("server %d: %s ip=%s reach=0x%02x\n", i, name ? name : "-",
+               ip ? ipaddr_ntoa(ip) : "-", esp_sntp_getreachability(i));
+    }
+    printf("sntp enabled=%d sync status=%d\n", esp_sntp_enabled(), sntp_get_sync_status());
     return 0;
 }
 
@@ -92,6 +108,7 @@ void console_start(void)
         { .command = "stop", .help = "Stop any movement", .func = cmd_stop },
         { .command = "goto", .help = "Seek to height: goto <mm>", .func = cmd_goto },
         { .command = "scan", .help = "Scan the I2C bus", .func = cmd_scan },
+        { .command = "time", .help = "Show clock and NTP server status", .func = cmd_time },
 #if CONFIG_DESK_DEBUG_COMMANDS
         { .command = "fault", .help = "Debug: raise a fault: fault [text]", .func = cmd_fault },
         { .command = "duty", .help = "Debug: use duty budget: duty <s> | duty clear", .func = cmd_duty },

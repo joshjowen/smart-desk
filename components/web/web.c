@@ -24,6 +24,35 @@ extern const uint8_t index_gz_end[] asm("_binary_index_html_gz_end");
 static httpd_handle_t s_server;
 static esp_timer_handle_t s_push_timer;
 
+/* Sockets that completed a WebSocket handshake. The server can't tell us this
+ * reliably from inside close_fn, so we track it ourselves. */
+#define MAX_WS 10
+static int s_ws_fds[MAX_WS] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+static portMUX_TYPE s_ws_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void ws_track(int fd, bool add)
+{
+    portENTER_CRITICAL(&s_ws_lock);
+    for (int i = 0; i < MAX_WS; i++) {
+        if (add ? s_ws_fds[i] < 0 : s_ws_fds[i] == fd) {
+            s_ws_fds[i] = add ? fd : -1;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_ws_lock);
+}
+
+static bool ws_tracked(int fd)
+{
+    bool found = false;
+    portENTER_CRITICAL(&s_ws_lock);
+    for (int i = 0; i < MAX_WS; i++) {
+        found |= s_ws_fds[i] == fd;
+    }
+    portEXIT_CRITICAL(&s_ws_lock);
+    return found;
+}
+
 /* ---------------- page ---------------- */
 
 static esp_err_t index_get(httpd_req_t *req)
@@ -118,19 +147,34 @@ static void ws_handle_cmd(httpd_req_t *req, const char *txt)
     cJSON_Delete(o);
 }
 
+/* Called by httpd once the WebSocket handshake is done (IDF 5.5 no longer calls
+ * the URI handler for the handshake itself). */
+static esp_err_t ws_post_handshake(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    ESP_LOGI(TAG, "WebSocket client connected (fd %d)", fd);
+    if (!ws_tracked(fd)) {
+        ws_track(fd, true);
+    }
+    /* Send the current state right away. */
+    cJSON *st = web_status_json();
+    char *s = cJSON_PrintUnformatted(st);
+    cJSON_Delete(st);
+    if (s) {
+        ws_send_text(req, s);
+        cJSON_free(s);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        ESP_LOGI(TAG, "WebSocket client connected (fd %d)", httpd_req_to_sockfd(req));
-        /* Send the current state right away. */
-        cJSON *st = web_status_json();
-        char *s = cJSON_PrintUnformatted(st);
-        cJSON_Delete(st);
-        if (s) {
-            ws_send_text(req, s);
-            cJSON_free(s);
-        }
-        return ESP_OK;
+        return ESP_OK;  /* older IDF behaviour; handshake work is in ws_post_handshake */
+    }
+    int fd = httpd_req_to_sockfd(req);
+    if (!ws_tracked(fd)) {
+        ws_track(fd, true);
     }
     httpd_ws_frame_t f = { 0 };
     esp_err_t err = httpd_ws_recv_frame(req, &f, 0);
@@ -152,12 +196,14 @@ static esp_err_t ws_handler(httpd_req_t *req)
  * for the heartbeat timeout. */
 static void on_close(httpd_handle_t hd, int fd)
 {
-    motion_status_t st;
-    motion_get_status(&st);
-    if (st.state == MOTION_JOG && st.source == MOTION_SRC_WEB &&
-        httpd_ws_get_fd_info(hd, fd) == HTTPD_WS_CLIENT_WEBSOCKET) {
-        ESP_LOGW(TAG, "WebSocket closed during web jog: STOP");
-        motion_stop(MOTION_SRC_WEB);
+    if (ws_tracked(fd)) {
+        ws_track(fd, false);
+        motion_status_t st;
+        motion_get_status(&st);
+        if (st.state == MOTION_JOG && st.source == MOTION_SRC_WEB) {
+            ESP_LOGW(TAG, "WebSocket closed during web jog: STOP");
+            motion_stop(MOTION_SRC_WEB);
+        }
     }
     close(fd);
 }
@@ -226,7 +272,8 @@ esp_err_t web_start(void)
     }
 
     const httpd_uri_t index = { .uri = "/", .method = HTTP_GET, .handler = index_get };
-    const httpd_uri_t ws = { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true };
+    const httpd_uri_t ws = { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true,
+                             .ws_post_handshake_cb = ws_post_handshake };
     httpd_register_uri_handler(s_server, &index);
     httpd_register_uri_handler(s_server, &ws);
     web_api_register(s_server);

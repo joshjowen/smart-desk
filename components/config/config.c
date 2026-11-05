@@ -79,20 +79,32 @@ esp_err_t config_init(void)
     }
     s_mutex = xSemaphoreCreateMutex();
 
+    /* Older versions are a prefix of the current struct (fields are only ever
+     * appended), so load what is stored and default the rest. */
     nvs_handle_t h;
-    size_t len = sizeof(s_cfg);
     bool loaded = false;
+    defaults(&s_cfg);
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        loaded = nvs_get_blob(h, NVS_KEY, &s_cfg, &len) == ESP_OK && len == sizeof(s_cfg) &&
-                 s_cfg.version == CONFIG_VERSION;
+        size_t len = 0;
+        if (nvs_get_blob(h, NVS_KEY, NULL, &len) == ESP_OK && len >= sizeof(uint32_t) && len <= sizeof(s_cfg)) {
+            desk_config_t stored;
+            defaults(&stored);
+            if (nvs_get_blob(h, NVS_KEY, &stored, &len) == ESP_OK && stored.version >= 1 &&
+                stored.version <= CONFIG_VERSION) {
+                if (stored.version != CONFIG_VERSION) {
+                    ESP_LOGW(TAG, "migrating settings v%lu -> v%d", (unsigned long)stored.version, CONFIG_VERSION);
+                }
+                s_cfg = stored;
+                s_cfg.version = CONFIG_VERSION;
+                loaded = true;
+            }
+        }
         nvs_close(h);
     }
     if (!loaded) {
-        /* Future versions migrate here; for now any mismatch resets to defaults. */
-        ESP_LOGW(TAG, "no valid settings (v%d expected): using defaults", CONFIG_VERSION);
-        defaults(&s_cfg);
-        save(&s_cfg);
+        ESP_LOGW(TAG, "no valid settings: using defaults");
     }
+    save(&s_cfg);
     ESP_LOGI(TAG, "settings v%lu loaded: hostname '%s', wifi '%s', remote moves %s, admin password %s",
              (unsigned long)s_cfg.version, s_cfg.hostname, s_cfg.wifi_ssid[0] ? s_cfg.wifi_ssid : "(none)",
              s_cfg.allow_remote_moves ? "ON" : "off", s_cfg.admin_set ? "set" : "not set");
@@ -154,6 +166,9 @@ static bool validate(const desk_config_t *c, char *err, size_t err_len)
     if (c->backlight < CFG_BL_MIN || c->backlight > CFG_BL_MAX) FAIL("Backlight: %d-%d %%", CFG_BL_MIN, CFG_BL_MAX);
     if (c->mqtt_uri[0] && strncmp(c->mqtt_uri, "mqtt://", 7) != 0 && strncmp(c->mqtt_uri, "mqtts://", 8) != 0)
         FAIL("MQTT broker: must start with mqtt:// or mqtts://");
+    for (const char *p = c->ntp_server; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) FAIL("Time server: a hostname or IP address");
+    }
     if (c->mqtt_device_id[0] && !valid_hostname(c->mqtt_device_id))
         FAIL("MQTT device ID: lowercase letters, digits and '-'");
     return true;

@@ -30,6 +30,8 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static net_status_t s_st;
 static esp_timer_handle_t s_fallback_timer, s_reconnect_timer, s_ap_check_timer;
 static bool s_sntp_started;
+static char s_ntp_cfg[64];       /* configured time server, empty = gateway */
+static char s_ntp_gw[16];        /* gateway address, used when s_ntp_cfg is empty */
 static bool s_mdns_ok;
 
 static void set_status(void (*fn)(net_status_t *, const void *), const void *arg)
@@ -121,13 +123,39 @@ static void ap_check_cb(void *arg)
     }
 }
 
+static void on_time_sync(struct timeval *tv)
+{
+    time_t now = tv->tv_sec;
+    struct tm t;
+    gmtime_r(&now, &t);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
+    ESP_LOGI(TAG, "clock synced: %s UTC", buf);
+}
+
+/* Time servers, in order: one offered by DHCP (slot 0), the configured server or
+ * else the gateway (many routers run NTP, and works on internet-less VLANs),
+ * then pool.ntp.org. */
 static void start_services(void)
 {
     if (!s_sntp_started) {
-        esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-        if (esp_netif_sntp_init(&c) == ESP_OK) {
-            s_sntp_started = true;
+        const char *local = s_ntp_cfg[0] ? s_ntp_cfg : s_ntp_gw;
+        esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(2, ESP_SNTP_SERVER_LIST(local, "pool.ntp.org"));
+        c.server_from_dhcp = true;          /* prefer the router's NTP server if it offers one */
+        c.renew_servers_after_new_IP = true;
+        c.index_of_first_server = 1;        /* slot 0 is for the DHCP-provided server */
+        c.sync_cb = on_time_sync;
+        c.start = false;
+        esp_err_t e = esp_netif_sntp_init(&c);
+        if (e == ESP_OK) {
+            e = esp_netif_sntp_start();
         }
+        esp_netif_dns_info_t dns;
+        if (esp_netif_get_dns_info(s_sta, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
+            ESP_LOGI(TAG, "SNTP start: %s (servers: DHCP-offered, %s, pool.ntp.org; DNS " IPSTR ")",
+                     esp_err_to_name(e), local, IP2STR(&dns.ip.u_addr.ip4));
+        }
+        s_sntp_started = e == ESP_OK;
     }
 }
 
@@ -167,6 +195,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *e = data;
         char ip[16];
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&e->ip_info.ip));
+        snprintf(s_ntp_gw, sizeof(s_ntp_gw), IPSTR, IP2STR(&e->ip_info.gw));
         set_status(st_conn, ip);
         esp_timer_stop(s_fallback_timer);
         ESP_LOGI(TAG, "connected to '%s', IP %s, http://%s.local", s_st.sta_ssid, ip, s_st.hostname);
@@ -208,6 +237,17 @@ static void st_names(net_status_t *s, const void *a)
     s->sta_configured = c->wifi_ssid[0] != 0;
 }
 
+static void restart_sntp(void)
+{
+    if (s_sntp_started) {
+        esp_netif_sntp_deinit();
+        s_sntp_started = false;
+    }
+    if (s_st.sta_connected) {
+        start_services();
+    }
+}
+
 esp_err_t net_start(const desk_config_t *cfg)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -227,6 +267,7 @@ esp_err_t net_start(const desk_config_t *cfg)
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_st.ap_ssid, sizeof(s_st.ap_ssid), "Desk-Setup-%02X%02X", mac[4], mac[5]);
     set_status(st_names, cfg);
+    strlcpy(s_ntp_cfg, cfg->ntp_server, sizeof(s_ntp_cfg));
 
     const esp_timer_create_args_t t1 = { .callback = fallback_cb, .name = "wifi_fb" };
     const esp_timer_create_args_t t2 = { .callback = reconnect_cb, .name = "wifi_rc" };
@@ -264,6 +305,11 @@ void net_apply_config(const desk_config_t *cfg)
     }
     bool host_changed = strcmp(old.hostname, cfg->hostname) != 0;
     set_status(st_names, cfg);
+    if (strcmp(s_ntp_cfg, cfg->ntp_server) != 0) {
+        strlcpy(s_ntp_cfg, cfg->ntp_server, sizeof(s_ntp_cfg));
+        ESP_LOGI(TAG, "time server now '%s'", s_ntp_cfg[0] ? s_ntp_cfg : "(gateway)");
+        restart_sntp();
+    }
 
     if (host_changed) {
         esp_netif_set_hostname(s_sta, cfg->hostname);

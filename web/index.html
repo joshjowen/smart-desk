@@ -51,6 +51,11 @@ dialog{border:0;border-radius:16px;background:var(--card);color:var(--text);max-
 dialog::backdrop{background:#0008}
 progress{width:100%}
 .hint{font-size:13px;color:var(--dim)}
+.netlist{margin-top:8px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.netlist button{display:flex;width:100%;justify-content:space-between;align-items:center;border-radius:0;background:transparent;text-align:left;padding:12px;border-bottom:1px solid var(--line)}
+.netlist button:last-child{border-bottom:0}
+.netlist button.sel{background:var(--btn)}
+.netlist small{color:var(--dim);white-space:nowrap;margin-left:12px}
 </style>
 </head>
 <body>
@@ -80,11 +85,12 @@ progress{width:100%}
   <form id="cfgForm">
   <div class="card"><h2>Wi-Fi</h2>
     <label for="ssid">Network</label>
-    <div class="row"><input id="ssid" list="ssidList" autocomplete="off"><button type="button" id="scan" style="flex:0">Scan</button></div>
-    <datalist id="ssidList"></datalist>
+    <div class="row"><input id="ssid" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="button" id="scan" style="flex:0">Scan</button></div>
+    <div id="ssidList" class="netlist" hidden></div>
     <label for="wpass">Password</label><input id="wpass" type="password" placeholder="unchanged" autocomplete="new-password">
     <label for="hostname">Hostname</label><input id="hostname" pattern="[a-z0-9-]{1,32}">
     <p class="hint">The desk is reachable at http://<span id="hostPreview">desk</span>.local</p>
+    <label for="ntp">Time server</label><input id="ntp" placeholder="automatic (your router)" autocapitalize="off" spellcheck="false">
   </div>
   <div class="card"><h2>Presets</h2><div id="presetRows"></div><p class="hint" id="presetRange"></p></div>
   <div class="card"><h2>Display</h2>
@@ -144,6 +150,7 @@ let st = null, cfg = null, ws = null, lastErrSeq = null, hbTimer = null, jogDir 
 
 function toast(msg, ms = 3000) { const t = $('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), ms); }
 function fmt(mm, units) { if (mm == null) return '--'; return units === 'cm' ? (mm / 10).toFixed(1) : String(mm); }
+function bars(rssi) { return rssi >= -55 ? '▂▄▆█' : rssi >= -67 ? '▂▄▆' : rssi >= -78 ? '▂▄' : '▂'; }
 function fmtDur(s) { s = Math.round(s); const m = Math.floor(s / 60); return m + ':' + String(s % 60).padStart(2, '0'); }
 
 /* ---- API with login ---- */
@@ -259,7 +266,7 @@ async function loadConfig() {
   cfg = await api('/api/config');
   $('ssid').value = cfg.wifi.ssid; $('wpass').value = '';
   $('wpass').placeholder = cfg.wifi.password_set ? 'unchanged' : 'none';
-  $('hostname').value = cfg.hostname; $('hostPreview').textContent = cfg.hostname;
+  $('hostname').value = cfg.hostname; $('hostPreview').textContent = cfg.hostname; $('ntp').value = cfg.ntp_server;
   $('units').value = cfg.display.units; $('autolock').value = cfg.display.autolock_s; $('dim').value = cfg.display.dim_s;
   $('backlight').value = cfg.display.backlight; $('blv').textContent = cfg.display.backlight;
   $('muri').value = cfg.mqtt.uri; $('muser').value = cfg.mqtt.username; $('mpass').value = ''; $('mdev').value = cfg.mqtt.device_id;
@@ -282,16 +289,28 @@ $('backlight').oninput = e => $('blv').textContent = e.target.value;
 $('scan').onclick = async () => {
   $('scan').disabled = true;
   try {
-    const r = await api('/api/wifi/scan'); const dl = $('ssidList'); dl.innerHTML = '';
-    r.networks.forEach(n => { const o = document.createElement('option'); o.value = n.ssid; o.label = n.rssi + ' dBm' + (n.secure ? '' : ' (open)'); dl.appendChild(o); });
-    toast(r.networks.length + ' networks found');
+    const r = await api('/api/wifi/scan'); const list = $('ssidList'); list.innerHTML = '';
+    r.networks.sort((a, b) => b.rssi - a.rssi).forEach(n => {
+      const b = document.createElement('button'); b.type = 'button';
+      const name = document.createElement('span'); name.textContent = n.ssid;
+      const info = document.createElement('small'); info.textContent = bars(n.rssi) + (n.secure ? ' 🔒' : ' open');
+      b.append(name, info);
+      b.onclick = () => {
+        $('ssid').value = n.ssid;
+        list.querySelectorAll('button').forEach(x => x.classList.toggle('sel', x === b));
+        if (n.secure) $('wpass').focus();
+      };
+      list.appendChild(b);
+    });
+    list.hidden = r.networks.length === 0;
+    if (!r.networks.length) toast('No networks found');
   } catch (e) { toast(e.message); }
   $('scan').disabled = false;
 };
 $('cfgForm').onsubmit = async e => {
   e.preventDefault();
   const body = {
-    wifi: { ssid: $('ssid').value.trim() }, hostname: $('hostname').value.trim(),
+    wifi: { ssid: $('ssid').value.trim() }, hostname: $('hostname').value.trim(), ntp_server: $('ntp').value.trim(),
     presets: [...$('presetRows').children].map(r => ({ enabled: r.children[0].checked, name: r.children[1].value.trim(), mm: Number(r.children[2].value) })),
     display: { units: $('units').value, autolock_s: Number($('autolock').value), dim_s: Number($('dim').value), backlight: Number($('backlight').value) },
     mqtt: { uri: $('muri').value.trim(), username: $('muser').value, device_id: $('mdev').value.trim() },

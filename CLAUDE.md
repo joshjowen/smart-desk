@@ -15,19 +15,17 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 - Unknown hardware facts go behind Kconfig or a single constant in `main/board_config.h`, never a guess
   baked into code.
 - Git: commit at the end of each stage (and for fixes once Josh confirms them). Commit message trailer:
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Author must be
+  `Josh Owen <joshjowen@hotmail.com>` (set in the repo's local git config). Remote:
+  `github.com/joshjowen/smart-desk` (public, GPL-3.0), branch `main`. Never commit private data
+  (Wi-Fi names/passwords, IPs of Josh's network, `sdkconfig`).
+- Web-side tests can be run from the PC with curl / python `websockets` (IDF env) against the desk.
 
 ## Current status
 
 - **Stage 0 (prototype GUI): done and accepted on hardware.** Landscape UI, touch working.
-- **Stage 1 (Wi-Fi, settings, web UI): code complete and building, NOT yet flashed or tested.**
-  Flashing failed because the board dropped off USB (suspected USB fault on the PC). Next steps:
-  1. Flash, check the boot log (config load, setup AP `Desk-Setup-XXXX`, web server start, no errors).
-  2. Have Josh run the stage 1 acceptance list (see spec): SoftAP setup from a phone, settings survive
-     reboot and invalid values are rejected, closing a tab mid-jog stops within 300 ms, display and web
-     agree, OTA upload works and a bad image rolls back (build one with
-     `CONFIG_DESK_DEBUG_BOOT_CRASH=y`).
-  3. Update CHANGELOG/README for stage 1, commit, then stop for Josh.
+- **Stage 1 (Wi-Fi, settings, web UI): done; all acceptance checks passed on hardware** (see CHANGELOG).
+  Waiting for Josh to say go before stage 2.
 - Open question raised with Josh: the setup AP is open (no password). Offered to add one.
 - Stages 2–6 not started. The desk is physically wired to the optos; only the VL53L0X is not connected.
 
@@ -36,14 +34,14 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 ```sh
 . ~/esp/esp-idf-v5.5.6/export.sh          # every new shell
 idf.py build
-idf.py -p /dev/ttyACM1 flash               # port may differ on another machine: ls /dev/ttyACM*
-idf.py -p /dev/ttyACM1 monitor             # interactive only (needs a TTY)
+idf.py -p /dev/ttyACM0 flash               # port moves between ACM0/ACM1 (a USB speakerphone is also ACM): check with udevadm
+idf.py -p /dev/ttyACM0 monitor             # interactive only (needs a TTY)
 ```
 
 From Claude Code (no TTY), capture logs and drive the console with:
 
 ```sh
-python tools/serlog.py /dev/ttyACM1 15 --reset "status" "goto 900"
+python tools/serlog.py /dev/ttyACM0 15 --reset "status" "goto 900"
 ```
 
 Fresh machine setup (ESP-IDF v5.5.6 — `install.sh` did not fetch cmake/ninja, so install them too):
@@ -105,5 +103,9 @@ tools/serlog.py       serial capture helper
   Touch: swap_xy only, with x_max/y_max given in native portrait (172/320).
 - Onboard I2C devices: 0x63 (touch), 0x6b (QMI8658 IMU, unused). 0x29 (VL53L0X) is free. One boot showed
   intermittent `i2c.master: probe device timeout` errors during the boot scan; not reproduced since.
+- ESP-IDF 5.5 httpd does NOT call the WebSocket URI handler for the handshake; use
+  `ws_post_handshake_cb` (`CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT`).
+- With `server_from_dhcp`, SNTP must be started explicitly (`esp_netif_sntp_start`).
+- Config struct: only append fields and bump `CONFIG_VERSION`; older blobs load as a prefix.
 - Library versions: LVGL 9.6, esp_lvgl_port 2.9, esp_lcd_touch 1.2 (older pins didn't compile together).
   LVGL 9.6 deprecates `lv_obj_add_flag`/`remove_flag` — warnings only, cleanup pending.
