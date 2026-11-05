@@ -1,0 +1,27 @@
+menu "Desk UI"
+
+    config DESK_UI_UNITS_CM
+        bool "Show height in cm (otherwise mm)"
+        default n
+
+    config DESK_UI_AUTOLOCK_S
+        int "Auto-lock after no touch (s)"
+        range 5 600
+        default 30
+
+    config DESK_UI_DIM_S
+        int "Dim backlight after locked for (s)"
+        range 5 3600
+        default 60
+
+    config DESK_UI_BACKLIGHT
+        int "Backlight level (%)"
+        range 5 100
+        default 80
+
+    config DESK_UI_BACKLIGHT_DIM
+        int "Dimmed backlight level (%)"
+        range 0 50
+        default 3
+
+endmenu

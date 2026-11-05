@@ -1,0 +1,62 @@
+menu "Desk motion"
+
+    config DESK_SIMULATOR
+        bool "Simulated desk (no GPIO output)"
+        default y
+        help
+            Stage 0/1: motion drives a simulated desk instead of the opto outputs.
+            The opto GPIOs are never configured while this is enabled.
+
+    config DESK_SIM_SPEED_MM_S
+        int "Simulated speed (mm/s)"
+        depends on DESK_SIMULATOR
+        default 25
+
+    config DESK_SIM_MIN_MM
+        int "Simulated lowest height (mm)"
+        depends on DESK_SIMULATOR
+        default 650
+
+    config DESK_SIM_MAX_MM
+        int "Simulated highest height (mm)"
+        depends on DESK_SIMULATOR
+        default 1150
+
+    config DESK_SIM_START_MM
+        int "Simulated height at boot (mm)"
+        depends on DESK_SIMULATOR
+        default 720
+
+    config DESK_PRESET_SIT_MM
+        int "Default Sit preset (mm)"
+        default 720
+
+    config DESK_PRESET_STAND_MM
+        int "Default Stand preset (mm)"
+        default 1100
+
+    config DESK_SEEK_TOLERANCE_MM
+        int "Seek tolerance (+/- mm)"
+        default 8
+
+    config DESK_MAX_MOVE_S_UNCAL
+        int "Max single move time before calibration (s)"
+        default 25
+
+    config DESK_DUTY_WINDOW_S
+        int "Duty-cycle rolling window (s)"
+        range 120 3600
+        default 1200
+
+    config DESK_DUTY_MAX_ON_S
+        int "Max motor-on time per window (s)"
+        range 10 600
+        default 120
+        help
+            Shorten (with the window) to test the cooldown path.
+
+    config DESK_DEBUG_COMMANDS
+        bool "Debug console commands (fault/duty injection, crash)"
+        default y
+
+endmenu
