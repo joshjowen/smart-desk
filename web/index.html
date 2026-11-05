@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Desk</title>
+<style>
+:root{--bg:#f2f2f7;--card:#fff;--text:#1c1c1e;--dim:#6e6e73;--line:#d1d1d6;--accent:#0a7aff;--warn:#c76a00;--bad:#d70015;--good:#248a3d;--btn:#e5e5ea}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--text:#f2f2f7;--dim:#8e8e93;--line:#38383a;--accent:#0a84ff;--warn:#ff9f0a;--bad:#ff453a;--good:#30d158;--btn:#2c2c2e}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);-webkit-tap-highlight-color:transparent}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;position:sticky;top:0;background:var(--bg);z-index:2}
+header h1{font-size:18px;margin:0;flex:1}
+#conn{font-size:13px;color:var(--dim)}
+#conn.ok{color:var(--good)}
+nav{display:flex;gap:4px;padding:0 16px 8px}
+nav button{flex:1;padding:8px;border:0;border-radius:10px;background:transparent;color:var(--dim);font:inherit;font-weight:600}
+nav button.on{background:var(--card);color:var(--text)}
+main{padding:0 16px 32px;max-width:560px;margin:0 auto}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border-radius:14px;padding:16px;margin:12px 0}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);margin:0 0 12px}
+.big{font-size:64px;font-weight:700;text-align:center;line-height:1.1;font-variant-numeric:tabular-nums}
+.big small{font-size:22px;color:var(--dim);font-weight:500;margin-left:4px}
+.sub{text-align:center;color:var(--dim);min-height:1.4em}
+.sub.seek{color:var(--warn)}
+.jog{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.jog button{height:96px;font-size:36px;user-select:none;-webkit-user-select:none;touch-action:none}
+button{font:inherit;border:0;border-radius:12px;padding:12px 16px;background:var(--btn);color:var(--text);cursor:pointer}
+button.active{outline:3px solid var(--accent)}
+button.primary{background:var(--accent);color:#fff}
+button.danger{background:var(--bad);color:#fff}
+button:disabled{opacity:.4;cursor:default}
+.stop{width:100%;height:72px;font-size:24px;font-weight:700;background:var(--bad);color:#fff;margin-top:12px}
+.presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
+.presets button{padding:14px 8px}.presets small{display:block;color:var(--dim)}
+.banner{border-radius:12px;padding:12px;margin:12px 0;background:var(--btn)}
+.banner.warn{border-left:4px solid var(--warn)}.banner.bad{border-left:4px solid var(--bad)}
+label{display:block;margin:10px 0 4px;font-size:14px;color:var(--dim)}
+input,select{width:100%;font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+input[type=checkbox]{width:auto;transform:scale(1.3);margin-right:8px}
+.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
+.check{display:flex;align-items:center;margin:12px 0;color:var(--text)}
+.preset-row{display:grid;grid-template-columns:auto 1fr 96px;gap:8px;align-items:center;margin:6px 0}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;word-break:break-all}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;max-width:90vw;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+#toast.on{opacity:1}
+dialog{border:0;border-radius:16px;background:var(--card);color:var(--text);max-width:340px;width:90vw}
+dialog::backdrop{background:#0008}
+progress{width:100%}
+.hint{font-size:13px;color:var(--dim)}
+</style>
+</head>
+<body>
+<header><h1 id="title">Desk</h1><span id="conn">connecting…</span></header>
+<nav><button data-tab="control" class="on">Control</button><button data-tab="settings">Settings</button><button data-tab="system">System</button></nav>
+<main>
+
+<section id="control" class="on">
+  <div id="faultBanner" class="banner bad" hidden></div>
+  <div id="coolBanner" class="banner warn" hidden></div>
+  <div id="lockBanner" class="banner warn" hidden></div>
+  <div class="card">
+    <div class="big"><span id="height">--</span><small id="unit">mm</small></div>
+    <div class="sub" id="state">&nbsp;</div>
+  </div>
+  <div class="card">
+    <div class="jog"><button id="up" aria-label="Up">▲</button><button id="down" aria-label="Down">▼</button></div>
+    <p class="hint">Hold to move. Releasing stops the desk.</p>
+    <div class="presets" id="presetBtns"></div>
+    <button class="stop" id="stop">STOP</button>
+  </div>
+</section>
+
+<section id="settings">
+  <div id="pwPrompt" class="banner warn" hidden>No admin password is set, so anyone on your network can change these settings.
+    <div class="actions"><button class="primary" id="pwPromptSet">Set password</button><button id="pwPromptDismiss">Not now</button></div></div>
+  <form id="cfgForm">
+  <div class="card"><h2>Wi-Fi</h2>
+    <label for="ssid">Network</label>
+    <div class="row"><input id="ssid" list="ssidList" autocomplete="off"><button type="button" id="scan" style="flex:0">Scan</button></div>
+    <datalist id="ssidList"></datalist>
+    <label for="wpass">Password</label><input id="wpass" type="password" placeholder="unchanged" autocomplete="new-password">
+    <label for="hostname">Hostname</label><input id="hostname" pattern="[a-z0-9-]{1,32}">
+    <p class="hint">The desk is reachable at http://<span id="hostPreview">desk</span>.local</p>
+  </div>
+  <div class="card"><h2>Presets</h2><div id="presetRows"></div><p class="hint" id="presetRange"></p></div>
+  <div class="card"><h2>Display</h2>
+    <label for="units">Units</label><select id="units"><option value="mm">mm</option><option value="cm">cm</option></select>
+    <div class="row"><div><label for="autolock">Auto-lock (s)</label><input id="autolock" type="number" min="5" max="600"></div>
+    <div><label for="dim">Dim after locked (s)</label><input id="dim" type="number" min="5" max="3600"></div></div>
+    <label for="backlight">Backlight <span id="blv"></span>%</label><input id="backlight" type="range" min="5" max="100">
+  </div>
+  <div class="card"><h2>MQTT (Home Assistant)</h2>
+    <label for="muri">Broker</label><input id="muri" placeholder="mqtt://192.168.1.10:1883">
+    <div class="row"><div><label for="muser">Username</label><input id="muser" autocomplete="off"></div>
+    <div><label for="mpass">Password</label><input id="mpass" type="password" placeholder="unchanged" autocomplete="new-password"></div></div>
+    <label for="mdev">Device ID</label><input id="mdev" placeholder="same as hostname">
+    <p class="hint">Used from stage 6.</p>
+  </div>
+  <div class="card"><h2>Safety</h2>
+    <label class="check"><input type="checkbox" id="remote">Allow remote moves</label>
+    <p class="hint">Off: this page can only move the desk while its screen is unlocked. STOP always works.</p>
+  </div>
+  <button class="primary" type="submit" style="width:100%">Save settings</button>
+  </form>
+  <div class="card"><h2>Admin password</h2>
+    <p class="hint" id="pwState"></p>
+    <div class="actions"><button id="pwChange">Set / change</button><button id="pwRemove">Remove</button></div>
+  </div>
+</section>
+
+<section id="system">
+  <div class="card"><h2>Device</h2><dl id="sysInfo"></dl></div>
+  <div class="card"><h2>Firmware update</h2>
+    <input type="file" id="otaFile" accept=".bin">
+    <progress id="otaProg" value="0" max="100" hidden></progress>
+    <div class="actions"><button class="primary" id="otaGo">Upload and install</button></div>
+    <p class="hint">Use build/smart_desk.bin. If the new firmware fails to start, the desk returns to the current one.</p>
+  </div>
+  <div class="card"><h2>Maintenance</h2>
+    <div class="actions"><button id="reboot">Reboot</button><button class="danger" id="factory">Factory reset</button></div>
+  </div>
+</section>
+</main>
+
+<dialog id="loginDlg"><form method="dialog" id="loginForm">
+  <h3 style="margin-top:0">Admin login</h3><label for="lpw">Password</label><input id="lpw" type="password" autocomplete="current-password">
+  <div class="actions"><button class="primary" value="ok">Log in</button><button value="cancel" formnovalidate>Cancel</button></div>
+</form></dialog>
+<dialog id="pwDlg"><form method="dialog" id="pwForm">
+  <h3 style="margin-top:0">Admin password</h3><label for="npw">New password (6+ characters)</label><input id="npw" type="password" minlength="6" autocomplete="new-password">
+  <label for="npw2">Repeat</label><input id="npw2" type="password" autocomplete="new-password">
+  <div class="actions"><button class="primary" value="ok">Save</button><button value="cancel" formnovalidate>Cancel</button></div>
+</form></dialog>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = sessionStorage.getItem('tok') || '';
+let st = null, cfg = null, ws = null, lastErrSeq = null, hbTimer = null, jogDir = null;
+
+function toast(msg, ms = 3000) { const t = $('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), ms); }
+function fmt(mm, units) { if (mm == null) return '--'; return units === 'cm' ? (mm / 10).toFixed(1) : String(mm); }
+function fmtDur(s) { s = Math.round(s); const m = Math.floor(s / 60); return m + ':' + String(s % 60).padStart(2, '0'); }
+
+/* ---- API with login ---- */
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {}, token ? { Authorization: 'Bearer ' + token } : {});
+  let r = await fetch(path, opts);
+  if (r.status === 401 && path !== '/api/login') {
+    if (!(await login())) throw new Error('Login required');
+    opts.headers.Authorization = 'Bearer ' + token;
+    r = await fetch(path, opts);
+  }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+function login() {
+  return new Promise(res => {
+    const d = $('loginDlg'); $('lpw').value = ''; d.showModal();
+    d.onclose = async () => {
+      if (d.returnValue !== 'ok') return res(false);
+      try {
+        const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ password: $('lpw').value }) });
+        const b = await r.json();
+        if (!r.ok) { toast(b.error || 'Login failed'); return res(false); }
+        token = b.token; sessionStorage.setItem('tok', token); res(true);
+      } catch (e) { toast(e.message); res(false); }
+    };
+  });
+}
+const putJSON = (path, obj, method = 'PUT') => api(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
+
+/* ---- tabs ---- */
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+async function showTab(name) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === name));
+  try {
+    if (name === 'settings') await loadConfig();
+    if (name === 'system') await loadSystem();
+  } catch (e) { toast(e.message); }
+}
+
+/* ---- live channel ---- */
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'ok'; };
+  ws.onclose = () => { $('conn').textContent = 'reconnecting…'; $('conn').className = ''; endJog(false); setTimeout(connect, 1500); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'error') { toast(m.msg, 5000); endJog(false); return; }
+    render(m);
+  };
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+function render(s) {
+  st = s;
+  $('height').textContent = fmt(s.height_mm, s.units);
+  $('unit').textContent = s.units;
+  const sub = $('state');
+  sub.className = 'sub';
+  if (s.state === 'seek' || s.state === 'settle') { sub.textContent = '→ ' + fmt(s.target_mm, s.units) + ' ' + s.units; sub.classList.add('seek'); }
+  else if (s.state === 'jog') sub.textContent = s.output === 'up' ? 'moving up' : s.output === 'down' ? 'moving down' : '';
+  else sub.textContent = s.state === 'idle' ? '' : s.state;
+  $('up').classList.toggle('active', s.output === 'up');
+  $('down').classList.toggle('active', s.output === 'down');
+
+  const fb = $('faultBanner'); fb.hidden = !s.fault; fb.textContent = s.fault ? 'Fault: ' + s.fault + ' — acknowledge it on the desk display.' : '';
+  const cb = $('coolBanner'); cb.hidden = s.state !== 'cooldown'; cb.textContent = 'Motor cooling down: ' + fmtDur(s.cooldown_s) + ' left.';
+  const blocked = s.locked && !s.remote_moves_allowed;
+  const lb = $('lockBanner'); lb.hidden = !blocked;
+  lb.textContent = 'The desk display is locked. Unlock it to control the desk from here, or turn on "Allow remote moves" in Settings. STOP always works.';
+  const canMove = !blocked && s.state !== 'fault' && s.state !== 'cooldown';
+  $('up').disabled = $('down').disabled = !canMove;
+
+  const pb = $('presetBtns'); const key = JSON.stringify(s.presets) + s.units;
+  if (pb._k !== key) {
+    pb._k = key; pb.innerHTML = '';
+    s.presets.forEach(p => { const b = document.createElement('button'); b.dataset.id = p.id; b.innerHTML = '<b></b><small></small>'; b.firstChild.textContent = p.name; b.lastChild.textContent = fmt(p.mm, s.units) + ' ' + s.units; b.onclick = () => send({ cmd: 'preset', id: p.id }); pb.appendChild(b); });
+  }
+  pb.querySelectorAll('button').forEach(b => b.disabled = !canMove || !s.presets_available);
+
+  if (lastErrSeq !== null && s.last_error_seq !== lastErrSeq && s.last_error) toast(s.last_error);
+  lastErrSeq = s.last_error_seq;
+}
+
+/* ---- hold-to-run ---- */
+function startJog(dir, e) {
+  e.preventDefault();
+  if (e.currentTarget.disabled) return;
+  if (e.pointerId !== undefined) e.currentTarget.setPointerCapture(e.pointerId);
+  jogDir = dir; send({ cmd: 'jog', dir });
+  clearInterval(hbTimer); hbTimer = setInterval(() => send({ cmd: 'hb' }), 100);
+}
+function endJog(sendStop = true) {
+  if (!jogDir) return;
+  jogDir = null; clearInterval(hbTimer); hbTimer = null;
+  if (sendStop) send({ cmd: 'stop' });
+}
+['up', 'down'].forEach(id => {
+  const b = $(id);
+  b.addEventListener('pointerdown', e => startJog(id, e));
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, () => endJog()));
+  b.addEventListener('contextmenu', e => e.preventDefault());
+});
+window.addEventListener('blur', () => endJog());
+document.addEventListener('visibilitychange', () => { if (document.hidden) endJog(); });
+window.addEventListener('pagehide', () => endJog());
+$('stop').onclick = () => { endJog(false); send({ cmd: 'stop' }); };
+
+/* ---- settings ---- */
+async function loadConfig() {
+  cfg = await api('/api/config');
+  $('ssid').value = cfg.wifi.ssid; $('wpass').value = '';
+  $('wpass').placeholder = cfg.wifi.password_set ? 'unchanged' : 'none';
+  $('hostname').value = cfg.hostname; $('hostPreview').textContent = cfg.hostname;
+  $('units').value = cfg.display.units; $('autolock').value = cfg.display.autolock_s; $('dim').value = cfg.display.dim_s;
+  $('backlight').value = cfg.display.backlight; $('blv').textContent = cfg.display.backlight;
+  $('muri').value = cfg.mqtt.uri; $('muser').value = cfg.mqtt.username; $('mpass').value = ''; $('mdev').value = cfg.mqtt.device_id;
+  $('mpass').placeholder = cfg.mqtt.password_set ? 'unchanged' : 'none';
+  $('remote').checked = cfg.allow_remote_moves;
+  const rows = $('presetRows'); rows.innerHTML = '';
+  cfg.presets.forEach((p, i) => {
+    const r = document.createElement('div'); r.className = 'preset-row';
+    r.innerHTML = `<input type="checkbox" aria-label="Enabled"><input aria-label="Name" maxlength="15"><input type="number" aria-label="Height mm">`;
+    const [en, nm, mm] = r.children; en.checked = p.enabled; nm.value = p.name; mm.value = p.mm;
+    rows.appendChild(r);
+  });
+  $('presetRange').textContent = `Heights in mm, ${cfg.limits.min_mm}–${cfg.limits.max_mm}.`;
+  $('pwPrompt').hidden = !cfg.admin_prompt;
+  $('pwState').textContent = cfg.admin_password_set ? 'A password protects Settings and System.' : 'No password set.';
+  $('pwRemove').disabled = !cfg.admin_password_set;
+}
+$('hostname').oninput = e => $('hostPreview').textContent = e.target.value || 'desk';
+$('backlight').oninput = e => $('blv').textContent = e.target.value;
+$('scan').onclick = async () => {
+  $('scan').disabled = true;
+  try {
+    const r = await api('/api/wifi/scan'); const dl = $('ssidList'); dl.innerHTML = '';
+    r.networks.forEach(n => { const o = document.createElement('option'); o.value = n.ssid; o.label = n.rssi + ' dBm' + (n.secure ? '' : ' (open)'); dl.appendChild(o); });
+    toast(r.networks.length + ' networks found');
+  } catch (e) { toast(e.message); }
+  $('scan').disabled = false;
+};
+$('cfgForm').onsubmit = async e => {
+  e.preventDefault();
+  const body = {
+    wifi: { ssid: $('ssid').value.trim() }, hostname: $('hostname').value.trim(),
+    presets: [...$('presetRows').children].map(r => ({ enabled: r.children[0].checked, name: r.children[1].value.trim(), mm: Number(r.children[2].value) })),
+    display: { units: $('units').value, autolock_s: Number($('autolock').value), dim_s: Number($('dim').value), backlight: Number($('backlight').value) },
+    mqtt: { uri: $('muri').value.trim(), username: $('muser').value, device_id: $('mdev').value.trim() },
+    allow_remote_moves: $('remote').checked,
+  };
+  if ($('wpass').value) body.wifi.password = $('wpass').value;
+  if ($('mpass').value) body.mqtt.password = $('mpass').value;
+  const wifiChanged = cfg && (body.wifi.ssid !== cfg.wifi.ssid || body.wifi.password);
+  try {
+    await putJSON('/api/config', body); await loadConfig();
+    toast(wifiChanged ? 'Saved. The desk is joining "' + body.wifi.ssid + '" — reconnect to that network and open http://' + body.hostname + '.local' : 'Settings saved', wifiChanged ? 8000 : 3000);
+  } catch (err) { toast(err.message, 6000); }
+};
+function askPassword() {
+  return new Promise(res => {
+    const d = $('pwDlg'); $('npw').value = $('npw2').value = ''; d.showModal();
+    d.onclose = () => {
+      if (d.returnValue !== 'ok') return res(null);
+      if ($('npw').value !== $('npw2').value) { toast('Passwords do not match'); return res(null); }
+      res($('npw').value);
+    };
+  });
+}
+async function setPassword(pw) {
+  try { await putJSON('/api/password', { password: pw }, 'POST'); token = ''; sessionStorage.removeItem('tok'); toast(pw ? 'Password set' : 'Password removed'); await loadConfig(); }
+  catch (e) { toast(e.message); }
+}
+$('pwChange').onclick = $('pwPromptSet').onclick = async () => { const pw = await askPassword(); if (pw) setPassword(pw); };
+$('pwRemove').onclick = () => { if (confirm('Remove the admin password?')) setPassword(''); };
+$('pwPromptDismiss').onclick = async () => { try { await putJSON('/api/password', { dismiss: true }, 'POST'); $('pwPrompt').hidden = true; } catch (e) { toast(e.message); } };
+
+/* ---- system ---- */
+async function loadSystem() {
+  const s = await api('/api/system');
+  const rows = [
+    ['Firmware', s.version + ' (' + s.partition + ')'], ['ESP-IDF', s.idf], ['Uptime', fmtUptime(s.uptime_s)],
+    ['Free heap', Math.round(s.free_heap / 1024) + ' KB (min ' + Math.round(s.min_free_heap / 1024) + ' KB)'],
+    ['Wi-Fi', s.connected ? s.ssid + ' (' + s.rssi + ' dBm)' : (s.ssid ? 'not connected to ' + s.ssid : 'not configured')],
+    ['IP', s.ip || '—'], ['Setup AP', s.ap_active ? s.ap_ssid : 'off'], ['Clock', s.time_synced ? 'synced' : 'not synced'],
+    ['Duty budget left', s.duty_remaining_s + ' s'], ['Last fault', s.last_fault || 'none'], ['Last reset', s.reset_reason],
+  ];
+  const dl = $('sysInfo'); dl.innerHTML = '';
+  rows.forEach(([k, v]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; dl.append(dt, dd); });
+}
+function fmtUptime(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + 'd ' : '') + h + 'h ' + m + 'm'; }
+$('reboot').onclick = async () => { if (!confirm('Reboot the desk controller?')) return; try { await api('/api/reboot', { method: 'POST' }); toast('Rebooting…'); } catch (e) { toast(e.message); } };
+$('factory').onclick = async () => {
+  if (!confirm('Factory reset erases Wi-Fi, presets and all settings. The desk will start its setup network. Continue?')) return;
+  try { await api('/api/factory-reset', { method: 'POST' }); toast('Resetting…', 6000); } catch (e) { toast(e.message); }
+};
+$('otaGo').onclick = () => {
+  const f = $('otaFile').files[0]; if (!f) return toast('Choose a .bin file first');
+  const send = () => {
+    const x = new XMLHttpRequest(); const p = $('otaProg'); p.hidden = false; p.value = 0; $('otaGo').disabled = true;
+    x.open('POST', '/api/ota'); if (token) x.setRequestHeader('Authorization', 'Bearer ' + token);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = e => { if (e.lengthComputable) p.value = e.loaded / e.total * 100; };
+    x.onload = async () => {
+      $('otaGo').disabled = false;
+      if (x.status === 401) { if (await login()) send(); return; }
+      let b = {}; try { b = JSON.parse(x.responseText); } catch (e) {}
+      toast(x.status === 200 ? 'Installed. Rebooting…' : 'Update failed: ' + (b.error || x.status), 8000);
+    };
+    x.onerror = () => { $('otaGo').disabled = false; toast('Upload failed'); };
+    x.send(f);
+  };
+  send();
+};
+
+connect();
+</script>
+</body>
+</html>

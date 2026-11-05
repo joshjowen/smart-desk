@@ -1,4 +1,6 @@
 dependencies:
   lvgl/lvgl: "^9.4.0"
   espressif/esp_lvgl_port: "^2.6.0"
-  espressif/esp_lcd_touch: "^1.2.0"
+  espressif/esp_lcd_touch:
+    version: "^1.2.0"
+    public: true

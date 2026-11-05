@@ -1,0 +1,14 @@
+menu "Desk app"
+
+    config DESK_OTA_VALID_AFTER_S
+        int "Mark new firmware valid after running this long (s)"
+        default 30
+        help
+            After an OTA update the new image is on probation. If it resets
+            before this time, the bootloader rolls back to the previous image.
+
+    config DESK_DEBUG_BOOT_CRASH
+        bool "Debug: crash 5 s after boot (build a deliberately bad OTA image)"
+        default n
+
+endmenu

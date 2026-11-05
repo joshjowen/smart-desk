@@ -56,6 +56,8 @@ static int64_t s_jog_deadline_us;
 static int32_t s_target_mm;
 static int64_t s_settle_until_us;
 static char s_fault[48];
+static char s_last_fault[48];
+static portMUX_TYPE s_preset_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_last_error[48];
 static uint32_t s_last_error_seq;
 static int32_t s_preset_mm[MOTION_PRESET_COUNT] = {
@@ -162,6 +164,7 @@ static void enter_fault(const char *text)
 {
     apply_output(MOTION_DIR_NONE, "fault");
     strlcpy(s_fault, text, sizeof(s_fault));
+    strlcpy(s_last_fault, text, sizeof(s_last_fault));
     ESP_LOGE(TAG, "FAULT: %s", text);
     set_state(MOTION_FAULT, text);
 }
@@ -234,11 +237,19 @@ static void handle(const motion_req_t *r)
         break;
 
     case MOTION_REQ_GOTO_PRESET:
-        if (r->value < 0 || r->value >= MOTION_PRESET_COUNT || s_preset_mm[r->value] <= 0) {
+    {
+        int32_t mm = 0;
+        if (r->value >= 0 && r->value < MOTION_PRESET_COUNT) {
+            portENTER_CRITICAL(&s_preset_lock);
+            mm = s_preset_mm[r->value];
+            portEXIT_CRITICAL(&s_preset_lock);
+        }
+        if (mm <= 0) {
             reject(r, "Preset not set");
         } else {
-            start_seek(r, s_preset_mm[r->value]);
+            start_seek(r, mm);
         }
+    }
         break;
 
     case MOTION_REQ_CALIBRATE:
@@ -361,6 +372,7 @@ static void step(uint32_t dt_ms)
     motion_status_t st = {
         .state = s_state,
         .output = s_out,
+        .source = s_src,
         .height_valid = h_ok,
         .height_mm = h,
         .target_mm = (s_state == MOTION_SEEK || s_state == MOTION_SETTLE) ? s_target_mm : 0,
@@ -371,7 +383,10 @@ static void step(uint32_t dt_ms)
         .cooldown_remaining_s = s_state == MOTION_COOLDOWN ? duty_wait_s_for(COOLDOWN_EXIT_MS) : 0,
         .last_error_seq = s_last_error_seq,
     };
+    portENTER_CRITICAL(&s_preset_lock);
     memcpy(st.preset_mm, s_preset_mm, sizeof(st.preset_mm));
+    portEXIT_CRITICAL(&s_preset_lock);
+    strlcpy(st.last_fault, s_last_fault, sizeof(st.last_fault));
     strlcpy(st.fault, s_state == MOTION_FAULT ? s_fault : "", sizeof(st.fault));
     strlcpy(st.last_error, s_last_error, sizeof(st.last_error));
     portENTER_CRITICAL(&s_lock);
@@ -430,6 +445,19 @@ void motion_get_status(motion_status_t *out)
     portENTER_CRITICAL(&s_lock);
     *out = s_pub;
     portEXIT_CRITICAL(&s_lock);
+}
+
+void motion_set_presets(const int32_t mm[MOTION_PRESET_COUNT])
+{
+    portENTER_CRITICAL(&s_preset_lock);
+    memcpy(s_preset_mm, mm, sizeof(s_preset_mm));
+    portEXIT_CRITICAL(&s_preset_lock);
+}
+
+void motion_get_range(int32_t *min_mm, int32_t *max_mm)
+{
+    *min_mm = s_min_mm;
+    *max_mm = s_max_mm;
 }
 
 bool motion_is_automatic(void)

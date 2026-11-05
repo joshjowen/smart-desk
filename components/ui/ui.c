@@ -21,6 +21,8 @@
 #endif
 #include "board.h"
 #include "motion.h"
+#include "config.h"
+#include "net.h"
 
 static const char *TAG = "ui";
 
@@ -40,14 +42,16 @@ static const char *TAG = "ui";
 #define COL_FAULT    lv_color_hex(0xFF453A)
 #define COL_COOL     lv_color_hex(0x64D2FF)
 
-/* Settings that become configurable in stage 1. */
+/* Display settings, updated from config by ui_apply_config(). */
 static struct {
     bool units_cm;
     uint32_t autolock_ms;
     uint32_t dim_ms;
     uint8_t backlight;
     uint8_t backlight_dim;
+    char preset_name[2][16];
 } s_cfg = {
+    .preset_name = { "Sit", "Stand" },
     .units_cm = UNITS_CM_DEFAULT,
     .autolock_ms = CONFIG_DESK_UI_AUTOLOCK_S * 1000,
     .dim_ms = CONFIG_DESK_UI_DIM_S * 1000,
@@ -71,8 +75,12 @@ static uint32_t s_frames;
 
 /* Widgets */
 typedef struct {
-    lv_obj_t *wifi, *mqtt, *fault;
+    lv_obj_t *wifi, *net, *mqtt, *fault;
 } status_row_t;
+
+static volatile bool s_locked = true;
+static net_status_t s_net;
+static bool s_have_net;
 
 static lv_obj_t *s_scr_lock, *s_scr_ctrl;
 static status_row_t s_lock_row, s_ctrl_row;
@@ -132,14 +140,18 @@ static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, lv_color_t 
     return l;
 }
 
-static void make_status_row(lv_obj_t *scr, status_row_t *row)
+/* Status row: Wi-Fi icon + address on the left, MQTT / fault on the right
+ * (`right_inset` leaves room for the Lock button on the control screen). */
+static void make_status_row(lv_obj_t *scr, status_row_t *row, int right_inset)
 {
     row->wifi = make_label(scr, &lv_font_montserrat_14, COL_OFF, LV_SYMBOL_WIFI);
     lv_obj_align(row->wifi, LV_ALIGN_TOP_LEFT, 10, 6);
+    row->net = make_label(scr, &lv_font_montserrat_14, COL_DIM, "");
+    lv_obj_align(row->net, LV_ALIGN_TOP_LEFT, 32, 6);
     row->mqtt = make_label(scr, &lv_font_montserrat_14, COL_OFF, "MQTT");
-    lv_obj_align_to(row->mqtt, row->wifi, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    lv_obj_align(row->mqtt, LV_ALIGN_TOP_RIGHT, -10 - right_inset, 6);
     row->fault = make_label(scr, &lv_font_montserrat_14, COL_FAULT, LV_SYMBOL_WARNING);
-    lv_obj_align_to(row->fault, row->mqtt, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    lv_obj_align_to(row->fault, row->mqtt, LV_ALIGN_OUT_LEFT_MID, -8, 0);
     lv_obj_add_flag(row->fault, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -193,6 +205,7 @@ static void show_lock(void)
     }
     knob_reset(false);
     lv_screen_load(s_scr_lock);
+    s_locked = true;
     s_locked_at_ms = now_ms();
     ESP_LOGI(TAG, "locked");
 }
@@ -200,6 +213,7 @@ static void show_lock(void)
 static void show_control(void)
 {
     lv_screen_load(s_scr_ctrl);
+    s_locked = false;
     s_last_touch_ms = now_ms();
     ESP_LOGI(TAG, "unlocked");
 }
@@ -351,7 +365,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 static void build_lock(void)
 {
     s_scr_lock = make_screen();
-    make_status_row(s_scr_lock, &s_lock_row);
+    make_status_row(s_scr_lock, &s_lock_row, 0);
 
     s_lock_height = make_label(s_scr_lock, &lv_font_montserrat_48, COL_TEXT, "--");
     lv_obj_align(s_lock_height, LV_ALIGN_TOP_MID, -16, 30);
@@ -403,7 +417,7 @@ static lv_obj_t *make_preset(lv_obj_t *parent, const char *name, motion_preset_t
 static void build_control(void)
 {
     s_scr_ctrl = make_screen();
-    make_status_row(s_scr_ctrl, &s_ctrl_row);
+    make_status_row(s_scr_ctrl, &s_ctrl_row, 64);
 
     lv_obj_t *lock = make_button(s_scr_ctrl, 56, 26, COL_PANEL);
     lv_obj_set_style_radius(lock, 13, 0);
@@ -534,16 +548,16 @@ static void render_status(const motion_status_t *st)
     update_row(&s_ctrl_row, st);
 
     /* Preset labels and availability */
-    char pl[24];
-    fmt_height(h, sizeof(h), true, st->preset_mm[MOTION_PRESET_SIT]);
-    snprintf(pl, sizeof(pl), "SIT\n%s", h);
-    lv_label_set_text(s_lbl_sit, pl);
-    fmt_height(h, sizeof(h), true, st->preset_mm[MOTION_PRESET_STAND]);
-    snprintf(pl, sizeof(pl), "STAND\n%s", h);
-    lv_label_set_text(s_lbl_stand, pl);
+    char pl[40];
     bool presets_ok = st->presets_available && st->state != MOTION_COOLDOWN && st->state != MOTION_FAULT;
-    lv_obj_set_state(s_btn_sit, LV_STATE_DISABLED, !presets_ok);
-    lv_obj_set_state(s_btn_stand, LV_STATE_DISABLED, !presets_ok);
+    lv_obj_t *btns[2] = { s_btn_sit, s_btn_stand }, *lbls[2] = { s_lbl_sit, s_lbl_stand };
+    for (int i = 0; i < 2; i++) {
+        int32_t mm = st->preset_mm[i];
+        fmt_height(h, sizeof(h), mm > 0, mm);
+        snprintf(pl, sizeof(pl), "%s\n%s", s_cfg.preset_name[i], h);
+        lv_label_set_text(lbls[i], pl);
+        lv_obj_set_state(btns[i], LV_STATE_DISABLED, !presets_ok || mm <= 0);
+    }
 
     /* Highlight the jog button that is actually driving. */
     lv_obj_set_style_border_width(s_btn_up, st->output == MOTION_DIR_UP ? 2 : 0, 0);
@@ -569,10 +583,37 @@ static void render_status(const motion_status_t *st)
     }
 }
 
+static void render_net_row(status_row_t *row, const net_status_t *n)
+{
+    char txt[64] = "";
+    lv_color_t c = COL_OFF;
+    if (n->sta_connected) {
+        snprintf(txt, sizeof(txt), "%s", n->ip);
+        c = COL_TEXT;
+    } else if (n->ap_active) {
+        snprintf(txt, sizeof(txt), "%s  " NET_AP_IP, n->ap_ssid);
+        c = COL_SEEK;
+    } else if (n->sta_configured) {
+        snprintf(txt, sizeof(txt), "connecting...");
+    }
+    lv_label_set_text(row->net, txt);
+    lv_obj_set_style_text_color(row->wifi, c, 0);
+}
+
 static void status_timer_cb(lv_timer_t *t)
 {
     motion_status_t st;
     motion_get_status(&st);
+
+    net_status_t n;
+    net_get_status(&n);
+    n.rssi = 0; /* don't re-render on RSSI jitter */
+    if (!s_have_net || memcmp(&n, &s_net, sizeof(n)) != 0) {
+        render_net_row(&s_lock_row, &n);
+        render_net_row(&s_ctrl_row, &n);
+        s_net = n;
+        s_have_net = true;
+    }
 
     if (!s_have_last || memcmp(&st, &s_last, sizeof(st)) != 0) {
         if (s_have_last && st.last_error_seq != s_last.last_error_seq) {
@@ -621,6 +662,36 @@ static void perf_timer_cb(lv_timer_t *t)
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned long)frames, secs, frames / secs);
+}
+
+/* ---------------- settings ---------------- */
+
+bool ui_is_locked(void)
+{
+    return s_locked;
+}
+
+void ui_apply_config(const desk_config_t *c)
+{
+    if (!s_disp || !lvgl_port_lock(1000)) {
+        return;
+    }
+    bool units_changed = s_cfg.units_cm != c->units_cm;
+    s_cfg.units_cm = c->units_cm;
+    s_cfg.autolock_ms = (uint32_t)c->autolock_s * 1000;
+    s_cfg.dim_ms = (uint32_t)c->dim_s * 1000;
+    s_cfg.backlight = c->backlight;
+    strlcpy(s_cfg.preset_name[0], c->presets[0].name, sizeof(s_cfg.preset_name[0]));
+    strlcpy(s_cfg.preset_name[1], c->presets[1].name, sizeof(s_cfg.preset_name[1]));
+    if (units_changed) {
+        lv_label_set_text(s_lock_unit, unit_str());
+        lv_label_set_text(s_ctrl_unit, unit_str());
+    }
+    if (!s_dimmed) {
+        board_backlight_set(s_cfg.backlight);
+    }
+    s_have_last = false;  /* force a full re-render */
+    lvgl_port_unlock();
 }
 
 /* ---------------- init ---------------- */

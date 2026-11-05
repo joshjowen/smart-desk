@@ -65,6 +65,7 @@ typedef struct {
 typedef struct {
     motion_state_t state;
     motion_dir_t output;          /* what the outputs are doing right now */
+    motion_source_t source;       /* who started the current move */
     bool height_valid;
     int32_t height_mm;
     int32_t target_mm;            /* valid in SEEK/SETTLE */
@@ -74,6 +75,7 @@ typedef struct {
     uint32_t duty_remaining_s;
     uint32_t cooldown_remaining_s;
     char fault[48];               /* empty when no fault */
+    char last_fault[48];          /* most recent fault since boot, kept after acknowledge */
     char last_error[48];          /* last rejected request, for the UI / API */
     uint32_t last_error_seq;      /* increments with each new last_error */
 } motion_status_t;
@@ -108,6 +110,12 @@ static inline esp_err_t motion_goto_preset(motion_preset_t p, motion_source_t sr
 }
 
 void motion_get_status(motion_status_t *out);
+
+/* Preset heights in mm, indexed by motion_preset_t; 0 = disabled. */
+void motion_set_presets(const int32_t mm[MOTION_PRESET_COUNT]);
+
+/* Usable height range for seeks and presets. */
+void motion_get_range(int32_t *min_mm, int32_t *max_mm);
 
 /* True while the desk is under automatic control (SEEK / SETTLE / CALIBRATING). */
 bool motion_is_automatic(void);
