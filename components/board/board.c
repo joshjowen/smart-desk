@@ -101,7 +101,7 @@ esp_err_t board_display_init(esp_lcd_panel_io_handle_t *io, esp_lcd_panel_handle
     ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(*panel, false, false), TAG, "mirror");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(*panel, BOARD_LCD_X_GAP, BOARD_LCD_Y_GAP), TAG, "gap");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(*panel, true), TAG, "disp on");
-    ESP_LOGI(TAG, "JD9853 %dx%d ready (x gap %d)", BOARD_LCD_H_RES, BOARD_LCD_V_RES, BOARD_LCD_X_GAP);
+    ESP_LOGI(TAG, "JD9853 ready, logical %dx%d (gap %d,%d)", BOARD_LCD_H_RES, BOARD_LCD_V_RES, BOARD_LCD_X_GAP, BOARD_LCD_Y_GAP);
     return ESP_OK;
 }
 
@@ -115,13 +115,24 @@ esp_err_t board_touch_init(esp_lcd_touch_handle_t *touch)
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &dev), TAG, "touch dev");
 
+    /* INT is deliberately not passed: with an INT pin esp_lvgl_port switches to
+     * interrupt-driven reads, which this controller doesn't drive the way it
+     * expects. Polling every LVGL input period is reliable and keeps
+     * hold-to-run reads continuous. */
+    const gpio_config_t int_cfg = {
+        .pin_bit_mask = BIT64(BOARD_PIN_TP_INT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    gpio_config(&int_cfg);
+
     const esp_lcd_touch_config_t cfg = {
-        .x_max = BOARD_LCD_H_RES,
-        .y_max = BOARD_LCD_V_RES,
+        .x_max = BOARD_LCD_NATIVE_W,
+        .y_max = BOARD_LCD_NATIVE_H,
         .rst_gpio_num = BOARD_PIN_TP_RST,
-        .int_gpio_num = BOARD_PIN_TP_INT,
+        .int_gpio_num = GPIO_NUM_NC,
         .levels = { .reset = 0, .interrupt = 0 },
-        .flags = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 0 },  /* portrait, from Waveshare demo */
+        .flags = { .swap_xy = BOARD_TP_SWAP_XY, .mirror_x = BOARD_TP_MIRROR_X, .mirror_y = BOARD_TP_MIRROR_Y },
     };
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_axs5106(dev, &cfg, touch), TAG, "touch");
     ESP_LOGI(TAG, "AXS5106L touch ready");

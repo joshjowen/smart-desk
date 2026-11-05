@@ -317,6 +317,9 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     s_orig_read(indev, data);
     bool pressed = data->state == LV_INDEV_STATE_PRESSED;
 
+    if (pressed != s_was_pressed) {
+        ESP_LOGD(TAG, "touch %s at %ld,%ld", pressed ? "down" : "up", (long)data->point.x, (long)data->point.y);
+    }
     if (pressed && !s_was_pressed) {
         if (motion_is_automatic()) {
             motion_stop(MOTION_SRC_TOUCH);
@@ -343,24 +346,26 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
 /* ---------------- screens ---------------- */
 
+/* Landscape layout, 320 x 172. */
+
 static void build_lock(void)
 {
     s_scr_lock = make_screen();
     make_status_row(s_scr_lock, &s_lock_row);
 
     s_lock_height = make_label(s_scr_lock, &lv_font_montserrat_48, COL_TEXT, "--");
-    lv_obj_align(s_lock_height, LV_ALIGN_TOP_MID, 0, 86);
+    lv_obj_align(s_lock_height, LV_ALIGN_TOP_MID, -16, 30);
     s_lock_unit = make_label(s_scr_lock, &lv_font_montserrat_20, COL_DIM, unit_str());
-    lv_obj_align_to(s_lock_unit, s_lock_height, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    lv_obj_align_to(s_lock_unit, s_lock_height, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -8);
     s_lock_info = make_label(s_scr_lock, &lv_font_montserrat_14, COL_SEEK, "");
-    lv_obj_set_width(s_lock_info, 160);
+    lv_obj_set_width(s_lock_info, 300);
     lv_obj_set_style_text_align(s_lock_info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lock_info, LV_ALIGN_TOP_MID, 0, 180);
+    lv_obj_align(s_lock_info, LV_ALIGN_TOP_MID, 0, 92);
 
     s_track = lv_obj_create(s_scr_lock);
-    lv_obj_set_size(s_track, 156, 56);
-    lv_obj_align(s_track, LV_ALIGN_BOTTOM_MID, 0, -18);
-    lv_obj_set_style_radius(s_track, 28, 0);
+    lv_obj_set_size(s_track, 288, 50);
+    lv_obj_align(s_track, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_radius(s_track, 25, 0);
     lv_obj_set_style_bg_color(s_track, COL_PANEL, 0);
     lv_obj_set_style_border_width(s_track, 0, 0);
     lv_obj_set_style_pad_all(s_track, 4, 0);
@@ -368,18 +373,18 @@ static void build_lock(void)
     lv_obj_remove_flag(s_track, LV_OBJ_FLAG_CLICKABLE);
 
     s_track_hint = make_label(s_track, &lv_font_montserrat_14, COL_DIM, "slide to unlock");
-    lv_obj_align(s_track_hint, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_align(s_track_hint, LV_ALIGN_CENTER, 20, 0);
 
     s_knob = lv_obj_create(s_track);
-    lv_obj_set_size(s_knob, 48, 48);
-    lv_obj_set_style_radius(s_knob, 24, 0);
+    lv_obj_set_size(s_knob, 56, 42);
+    lv_obj_set_style_radius(s_knob, 21, 0);
     lv_obj_set_style_bg_color(s_knob, COL_ACCENT, 0);
     lv_obj_set_style_border_width(s_knob, 0, 0);
     lv_obj_remove_flag(s_knob, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(s_knob, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_set_align(s_knob, LV_ALIGN_LEFT_MID);
     /* Bigger hit area so the knob is easy to grab. */
-    lv_obj_set_ext_click_area(s_knob, 6);
+    lv_obj_set_ext_click_area(s_knob, 8);
     lv_obj_t *arrow = make_label(s_knob, &lv_font_montserrat_20, COL_TEXT, LV_SYMBOL_RIGHT);
     lv_obj_center(arrow);
     lv_obj_add_event_cb(s_knob, knob_event_cb, LV_EVENT_ALL, NULL);
@@ -387,7 +392,7 @@ static void build_lock(void)
 
 static lv_obj_t *make_preset(lv_obj_t *parent, const char *name, motion_preset_t id, lv_obj_t **lbl)
 {
-    lv_obj_t *b = make_button(parent, 74, 52, COL_PANEL);
+    lv_obj_t *b = make_button(parent, 74, 46, COL_PANEL);
     *lbl = make_label(b, &lv_font_montserrat_14, COL_TEXT, name);
     lv_obj_set_style_text_align(*lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(*lbl);
@@ -400,38 +405,39 @@ static void build_control(void)
     s_scr_ctrl = make_screen();
     make_status_row(s_scr_ctrl, &s_ctrl_row);
 
-    lv_obj_t *lock = make_button(s_scr_ctrl, 52, 26, COL_PANEL);
+    lv_obj_t *lock = make_button(s_scr_ctrl, 56, 26, COL_PANEL);
     lv_obj_set_style_radius(lock, 13, 0);
-    lv_obj_align(lock, LV_ALIGN_TOP_RIGHT, -6, 2);
+    lv_obj_align(lock, LV_ALIGN_TOP_RIGHT, -8, 2);
     lv_obj_t *ll = make_label(lock, &lv_font_montserrat_14, COL_DIM, "Lock");
     lv_obj_center(ll);
     lv_obj_add_event_cb(lock, lock_btn_cb, LV_EVENT_CLICKED, NULL);
 
+    /* Left column (x 0..160): height, info, presets */
     s_ctrl_height = make_label(s_scr_ctrl, &lv_font_montserrat_48, COL_TEXT, "--");
-    lv_obj_align(s_ctrl_height, LV_ALIGN_TOP_MID, 0, 34);
+    lv_obj_align(s_ctrl_height, LV_ALIGN_TOP_LEFT, 10, 26);
     s_ctrl_unit = make_label(s_scr_ctrl, &lv_font_montserrat_14, COL_DIM, unit_str());
-    lv_obj_align_to(s_ctrl_unit, s_ctrl_height, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+    lv_obj_align_to(s_ctrl_unit, s_ctrl_height, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -8);
     s_ctrl_info = make_label(s_scr_ctrl, &lv_font_montserrat_14, COL_SEEK, "");
-    lv_obj_set_width(s_ctrl_info, 168);
-    lv_obj_set_style_text_align(s_ctrl_info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_ctrl_info, LV_ALIGN_TOP_MID, 0, 106);
-
-    s_btn_up = make_button(s_scr_ctrl, 156, 64, COL_PANEL);
-    lv_obj_align(s_btn_up, LV_ALIGN_TOP_MID, 0, 128);
-    lv_obj_t *lu = make_label(s_btn_up, &lv_font_montserrat_28, COL_TEXT, LV_SYMBOL_UP);
-    lv_obj_center(lu);
-    lv_obj_add_event_cb(s_btn_up, jog_event_cb, LV_EVENT_ALL, (void *)(intptr_t)MOTION_DIR_UP);
-
-    s_btn_down = make_button(s_scr_ctrl, 156, 64, COL_PANEL);
-    lv_obj_align(s_btn_down, LV_ALIGN_TOP_MID, 0, 200);
-    lv_obj_t *ld = make_label(s_btn_down, &lv_font_montserrat_28, COL_TEXT, LV_SYMBOL_DOWN);
-    lv_obj_center(ld);
-    lv_obj_add_event_cb(s_btn_down, jog_event_cb, LV_EVENT_ALL, (void *)(intptr_t)MOTION_DIR_DOWN);
+    lv_obj_set_width(s_ctrl_info, 152);
+    lv_obj_align(s_ctrl_info, LV_ALIGN_TOP_LEFT, 10, 82);
 
     s_btn_sit = make_preset(s_scr_ctrl, "SIT", MOTION_PRESET_SIT, &s_lbl_sit);
     lv_obj_align(s_btn_sit, LV_ALIGN_BOTTOM_LEFT, 8, -8);
     s_btn_stand = make_preset(s_scr_ctrl, "STAND", MOTION_PRESET_STAND, &s_lbl_stand);
-    lv_obj_align(s_btn_stand, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_obj_align(s_btn_stand, LV_ALIGN_BOTTOM_LEFT, 88, -8);
+
+    /* Right column: hold-to-run */
+    s_btn_up = make_button(s_scr_ctrl, 144, 62, COL_PANEL);
+    lv_obj_align(s_btn_up, LV_ALIGN_TOP_RIGHT, -8, 34);
+    lv_obj_t *lu = make_label(s_btn_up, &lv_font_montserrat_28, COL_TEXT, LV_SYMBOL_UP);
+    lv_obj_center(lu);
+    lv_obj_add_event_cb(s_btn_up, jog_event_cb, LV_EVENT_ALL, (void *)(intptr_t)MOTION_DIR_UP);
+
+    s_btn_down = make_button(s_scr_ctrl, 144, 62, COL_PANEL);
+    lv_obj_align(s_btn_down, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_obj_t *ld = make_label(s_btn_down, &lv_font_montserrat_28, COL_TEXT, LV_SYMBOL_DOWN);
+    lv_obj_center(ld);
+    lv_obj_add_event_cb(s_btn_down, jog_event_cb, LV_EVENT_ALL, (void *)(intptr_t)MOTION_DIR_DOWN);
 }
 
 static lv_obj_t *make_overlay(lv_color_t accent)
@@ -456,24 +462,23 @@ static void build_overlays(void)
     /* Cooldown */
     s_ov_cool = make_overlay(COL_COOL);
     lv_obj_t *t = make_label(s_ov_cool, &lv_font_montserrat_20, COL_COOL, "Cooling down");
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 14);
     s_ov_cool_time = make_label(s_ov_cool, &lv_font_montserrat_48, COL_TEXT, "0:00");
-    lv_obj_align(s_ov_cool_time, LV_ALIGN_CENTER, 0, -10);
-    lv_obj_t *m = make_label(s_ov_cool, &lv_font_montserrat_14, COL_DIM, "Motor duty limit reached.\nThe desk is resting.");
-    lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(m, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_align(s_ov_cool_time, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *m = make_label(s_ov_cool, &lv_font_montserrat_14, COL_DIM, "Motor duty limit reached. The desk is resting.");
+    lv_obj_align(m, LV_ALIGN_BOTTOM_MID, 0, -14);
 
     /* Fault */
     s_ov_fault = make_overlay(COL_FAULT);
     lv_obj_t *ft = make_label(s_ov_fault, &lv_font_montserrat_28, COL_FAULT, LV_SYMBOL_WARNING " FAULT");
-    lv_obj_align(ft, LV_ALIGN_TOP_MID, 0, 50);
+    lv_obj_align(ft, LV_ALIGN_TOP_MID, 0, 10);
     s_ov_fault_text = make_label(s_ov_fault, &lv_font_montserrat_20, COL_TEXT, "");
-    lv_obj_set_width(s_ov_fault_text, 150);
+    lv_obj_set_width(s_ov_fault_text, 290);
     lv_label_set_long_mode(s_ov_fault_text, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_ov_fault_text, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_ov_fault_text, LV_ALIGN_CENTER, 0, -20);
-    lv_obj_t *ack = make_button(s_ov_fault, 140, 52, COL_FAULT);
-    lv_obj_align(ack, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_align(s_ov_fault_text, LV_ALIGN_CENTER, 0, -8);
+    lv_obj_t *ack = make_button(s_ov_fault, 170, 46, COL_FAULT);
+    lv_obj_align(ack, LV_ALIGN_BOTTOM_MID, 0, -12);
     lv_obj_t *al = make_label(ack, &lv_font_montserrat_20, COL_TEXT, "Acknowledge");
     lv_obj_center(al);
     lv_obj_add_event_cb(ack, fault_ack_cb, LV_EVENT_CLICKED, NULL);
@@ -485,7 +490,7 @@ static void build_overlays(void)
     lv_obj_set_style_pad_hor(s_toast, 10, 0);
     lv_obj_set_style_pad_ver(s_toast, 6, 0);
     lv_obj_set_style_radius(s_toast, 10, 0);
-    lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 30);
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
     s_toast_timer = lv_timer_create(toast_hide_cb, TOAST_MS, NULL);
     lv_timer_pause(s_toast_timer);
@@ -504,22 +509,26 @@ static void update_row(status_row_t *row, const motion_status_t *st)
 
 static void render_status(const motion_status_t *st)
 {
-    char h[16], info[64] = "";
+    char h[16], info_lock[64] = "", info_ctrl[64] = "";
     fmt_height(h, sizeof(h), st->height_valid, st->height_mm);
     lv_label_set_text(s_lock_height, h);
     lv_label_set_text(s_ctrl_height, h);
+    lv_obj_align_to(s_lock_unit, s_lock_height, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -8);
+    lv_obj_align_to(s_ctrl_unit, s_ctrl_height, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, -8);
 
     bool automatic = st->state == MOTION_SEEK || st->state == MOTION_SETTLE;
     if (automatic) {
         char t[16];
         fmt_height(t, sizeof(t), true, st->target_mm);
-        snprintf(info, sizeof(info), LV_SYMBOL_RIGHT " %s %s\ntap anywhere to stop", t, unit_str());
+        snprintf(info_lock, sizeof(info_lock), LV_SYMBOL_RIGHT " %s %s  -  tap anywhere to stop", t, unit_str());
+        snprintf(info_ctrl, sizeof(info_ctrl), LV_SYMBOL_RIGHT " %s %s\ntap anywhere to stop", t, unit_str());
     } else if (st->state == MOTION_JOG) {
-        snprintf(info, sizeof(info), "%s", st->output == MOTION_DIR_UP ? "moving up" :
-                                          st->output == MOTION_DIR_DOWN ? "moving down" : "");
+        const char *m = st->output == MOTION_DIR_UP ? "moving up" : st->output == MOTION_DIR_DOWN ? "moving down" : "";
+        snprintf(info_lock, sizeof(info_lock), "%s", m);
+        snprintf(info_ctrl, sizeof(info_ctrl), "%s", m);
     }
-    lv_label_set_text(s_lock_info, info);
-    lv_label_set_text(s_ctrl_info, info);
+    lv_label_set_text(s_lock_info, info_lock);
+    lv_label_set_text(s_ctrl_info, info_ctrl);
 
     update_row(&s_lock_row, st);
     update_row(&s_ctrl_row, st);
@@ -636,7 +645,7 @@ esp_err_t ui_init(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel, es
         .vres = BOARD_LCD_V_RES,
         .monochrome = false,
         .color_format = LV_COLOR_FORMAT_RGB565,
-        .rotation = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
+        .rotation = { .swap_xy = BOARD_LCD_SWAP_XY, .mirror_x = BOARD_LCD_MIRROR_X, .mirror_y = BOARD_LCD_MIRROR_Y },
         .flags = { .buff_dma = true, .swap_bytes = true },
     };
     s_disp = lvgl_port_add_disp(&disp_cfg);

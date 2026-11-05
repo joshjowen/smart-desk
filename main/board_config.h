@@ -32,15 +32,27 @@
 #define BOARD_PIN_LCD_RST       GPIO_NUM_22
 #define BOARD_PIN_LCD_BL        GPIO_NUM_23
 #define BOARD_LCD_PCLK_HZ       (80 * 1000 * 1000)
-#define BOARD_LCD_H_RES         172
-#define BOARD_LCD_V_RES         320
-#define BOARD_LCD_X_GAP         34   /* 172 px panel sits at columns 34..205 of the 240-wide controller */
-#define BOARD_LCD_Y_GAP         0
+/* Landscape: logical 320 x 172. The panel is natively portrait (172 x 320); the
+ * 172 px side sits at controller columns 34..205, which become rows after the
+ * swap, hence the Y gap. */
+#define BOARD_LCD_NATIVE_W      172
+#define BOARD_LCD_NATIVE_H      320
+#define BOARD_LCD_H_RES         320
+#define BOARD_LCD_V_RES         172
+#define BOARD_LCD_X_GAP         0
+#define BOARD_LCD_Y_GAP         34
+#define BOARD_LCD_SWAP_XY       true
+#define BOARD_LCD_MIRROR_X      true
+#define BOARD_LCD_MIRROR_Y      false
 
 /* Touch: AXS5106L */
 #define BOARD_PIN_TP_RST        GPIO_NUM_20
 #define BOARD_PIN_TP_INT        GPIO_NUM_21
 #define BOARD_TP_I2C_ADDR       0x63
+/* Touch orientation for landscape (from Waveshare demo, rotation 90). */
+#define BOARD_TP_SWAP_XY        1
+#define BOARD_TP_MIRROR_X       0
+#define BOARD_TP_MIRROR_Y       0
 
 /* Do not use: 0 (battery ADC), 4/5/8/9/15 (strapping; 4 = TF CS, 15 = LCD DC),
  * 6 (IMU INT), 12/13 (USB), 16/17 (UART0). Handset sense candidate: GPIO17. */

@@ -29,7 +29,9 @@ static esp_err_t read_data(esp_lcd_touch_handle_t tp)
     uint8_t reg = REG_TOUCH_DATA;
     uint8_t buf[2 + 6 * MAX_POINTS] = {0};
 
-    ESP_RETURN_ON_ERROR(i2c_master_transmit_receive(t->dev, &reg, 1, buf, sizeof(buf), 50), TAG, "i2c read failed");
+    /* Separate write and read (STOP between), as in Waveshare's demo. */
+    ESP_RETURN_ON_ERROR(i2c_master_transmit(t->dev, &reg, 1, 50), TAG, "i2c write failed");
+    ESP_RETURN_ON_ERROR(i2c_master_receive(t->dev, buf, sizeof(buf), 50), TAG, "i2c read failed");
 
     uint8_t points = buf[1] & 0x0F;
     if (points > MAX_POINTS) {

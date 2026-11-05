@@ -17,4 +17,6 @@
 - Heap and frame rate logged every 10 s.
 - Serial console (`desk>` prompt) with status, stop, goto, scan, and debug fault/duty/crash commands.
 - Two-slot OTA partition table set up from the start (ota_0/ota_1 3 MB each, 1.9 MB storage).
+- Landscape UI (320 x 172).
+- Touch is polled (no INT pin passed to esp_lvgl_port, whose interrupt mode left touch dead).
 - Open item confirmed: onboard I2C devices are 0x63 (AXS5106L) and 0x6b (QMI8658); 0x29 is free.
