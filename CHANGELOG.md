@@ -1,5 +1,22 @@
 # Changelog
 
+## Stage 2: Up and down control without the sensor (0.2.0) — 2026-11-05
+
+- The real desk is driven through the PC817 optos in source mode (GPIO high = button pressed).
+  Kconfig: `DESK_OPTO_ACTIVE_LOW`, `DESK_OPTO_UP_GPIO` (3), `DESK_OPTO_DOWN_GPIO` (7).
+  `DESK_SIMULATOR` (now off by default) keeps the simulated desk for desk-free development.
+- Invariant 1: `opto_force_off()` is the first line of `app_main`: output latch set to off before the
+  driver is enabled, internal pull-down on. Polarity and pins logged at boot.
+- Invariant 9: a `--wrap=esp_panic_handler` hook drops both outputs inside the panic handler (crash,
+  abort, task and interrupt watchdogs) before the reset; a shutdown handler covers `esp_restart`.
+- Hold-to-run jog only; height shows `--`, presets disabled ("needs calibration") on screen, web and
+  API. Max move time fixed at 25 s.
+- Optional `DESK_HANDSET_SENSE`: debounced handset inputs, ignored while our own output drives that
+  line; a press stops automatic moves and counts against the duty budget.
+- Tested on the desk: moves while held from touchscreen and web, stops on release; original handset
+  works; no movement on reset, crash or reflash (without the external pull-downs); duty budget stops
+  a running jog and shows the cooldown countdown.
+
 ## Stage 1: Web interface for configuration (0.1.0) — 2026-11-05
 
 - `config`: typed, versioned settings in NVS (Wi-Fi, hostname, time server, presets, display, MQTT,

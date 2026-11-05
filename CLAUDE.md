@@ -24,10 +24,14 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 ## Current status
 
 - **Stage 0 (prototype GUI): done and accepted on hardware.** Landscape UI, touch working.
-- **Stage 1 (Wi-Fi, settings, web UI): done; all acceptance checks passed on hardware** (see CHANGELOG).
-  Waiting for Josh to say go before stage 2.
+- **Stage 1 (Wi-Fi, settings, web UI): done; all acceptance checks passed on hardware.**
+- **Stage 2 (real optos, hold-to-run): done and tested on the desk.** Source mode, active-high.
+  The external 10 kΩ pull-downs are NOT fitted (Josh accepted the risk; no movement seen on
+  reset/crash/flash). Waiting for Josh to say go before stage 3 (VL53L0X, not yet connected).
 - Open question raised with Josh: the setup AP is open (no password). Offered to add one.
-- Stages 2–6 not started. The desk is physically wired to the optos; only the VL53L0X is not connected.
+- Stages 3–6 not started. The desk is wired to the optos; the VL53L0X is not connected yet.
+- Firmware now really moves the desk: never command movement from Claude Code unless Josh is at the
+  desk and has said so.
 
 ## Build, flash, monitor
 
@@ -77,7 +81,8 @@ tools/serlog.py       serial capture helper
 
 ## Architecture notes
 
-- `motion` is the only code allowed to touch the opto GPIOs. Everything else sends `motion_request()`
+- `motion` is the only code allowed to touch the opto GPIOs (`opto.c`; `app_main` calls
+  `opto_force_off()` first). The panic hook in `opto.c` is linked with `--wrap=esp_panic_handler`. Everything else sends `motion_request()`
   (queue) and reads `motion_get_status()` (spinlock copy). STOP always wins within a queue batch.
 - Request sources: TOUCH, WEB, MQTT, HANDSET, SYSTEM (console). A heartbeat only extends a jog from the
   same source.
@@ -94,8 +99,9 @@ tools/serlog.py       serial capture helper
 
 - **GPIO3 is opto UP and also TF-card MISO.** The LCD SPI bus is initialised with `miso_io_num = -1`;
   never init the TF card. GPIO4 (TF CS) is driven high first thing in `app_main`.
-- **Opto pins are deliberately untouched while `CONFIG_DESK_SIMULATOR=y`.** Their safe "off" level
-  depends on source vs sink wiring (`DESK_OPTO_ACTIVE_LOW`, stage 2), which is not confirmed yet.
+- Opto module: GPIOs go to the module's I1/I2 terminals, ESP GND to its input-side G (source mode,
+  `DESK_OPTO_ACTIVE_LOW=n`). Outputs V1/V2 + G go to the handset lines. Both G terminals share one
+  ground plane (no isolation; fine, the ESP is powered from the desk supply).
 - **Touch must be polled.** Passing the INT pin to esp_lvgl_port switches it to interrupt-driven reads
   and touch goes dead. `board_touch_init()` passes `GPIO_NUM_NC`.
 - AXS5106L reads use separate write then read (STOP between), as in Waveshare's demo.

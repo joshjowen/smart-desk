@@ -8,11 +8,13 @@
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
 
+#include "sdkconfig.h"
+
 /* Opto outputs (handset UP / DOWN). Only the motion component may touch these.
- * Stage 0 never configures them: their safe level depends on the opto wiring
- * (CONFIG_DESK_OPTO_ACTIVE_LOW, added in stage 2). */
-#define BOARD_PIN_OPTO_UP       GPIO_NUM_3   /* also TF card MISO: TF is never initialised */
-#define BOARD_PIN_OPTO_DOWN     GPIO_NUM_7
+ * Pins and polarity are Kconfig options (Desk motion menu); defaults GPIO3 / GPIO7,
+ * source mode (active-high). */
+#define BOARD_PIN_OPTO_UP       ((gpio_num_t)CONFIG_DESK_OPTO_UP_GPIO)   /* GPIO3 is also TF MISO: TF is never initialised */
+#define BOARD_PIN_OPTO_DOWN     ((gpio_num_t)CONFIG_DESK_OPTO_DOWN_GPIO)
 
 /* TF card chip select: driven high right after boot so the card is never selected. */
 #define BOARD_PIN_TF_CS         GPIO_NUM_4

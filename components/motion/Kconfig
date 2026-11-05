@@ -1,11 +1,50 @@
 menu "Desk motion"
 
     config DESK_SIMULATOR
-        bool "Simulated desk (no GPIO output)"
-        default y
+        bool "Simulated desk (opto outputs stay off)"
+        default n
         help
-            Stage 0/1: motion drives a simulated desk instead of the opto outputs.
-            The opto GPIOs are never configured while this is enabled.
+            Motion drives a simulated desk instead of the opto outputs, for
+            desk-free development. The outputs are still forced off at boot.
+
+    config DESK_OPTO_ACTIVE_LOW
+        bool "Opto inputs are active-low (sink mode)"
+        default n
+        help
+            n: source mode, GPIO -> module IN (I1/I2), GPIO high = button pressed.
+            y: sink mode, 5 V -> IN+, GPIO -> IN-, GPIO low = button pressed.
+
+    config DESK_OPTO_UP_GPIO
+        int "Opto UP GPIO"
+        default 3
+
+    config DESK_OPTO_DOWN_GPIO
+        int "Opto DOWN GPIO"
+        default 7
+
+    config DESK_HANDSET_SENSE
+        bool "Sense physical handset presses"
+        default n
+        help
+            Reads the handset UP/DOWN lines (through a divider or opto) as inputs.
+            A press during an automatic move stops it.
+
+    config DESK_HANDSET_UP_GPIO
+        int "Handset sense UP GPIO"
+        depends on DESK_HANDSET_SENSE
+        default 17
+
+    config DESK_HANDSET_DOWN_GPIO
+        int "Handset sense DOWN GPIO"
+        depends on DESK_HANDSET_SENSE
+        default -1
+        help
+            -1 = not connected.
+
+    config DESK_HANDSET_ACTIVE_LOW
+        bool "Handset sense inputs read low when pressed"
+        depends on DESK_HANDSET_SENSE
+        default y
 
     config DESK_SIM_SPEED_MM_S
         int "Simulated speed (mm/s)"

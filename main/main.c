@@ -10,6 +10,7 @@
 #include "web.h"
 #include "board.h"
 #include "motion.h"
+#include "opto.h"
 #include "ui.h"
 #include "console.h"
 
@@ -67,8 +68,8 @@ static void boot_crash_cb(void *arg)
 
 void app_main(void)
 {
-    /* Must stay the very first action. In stage 2 this also forces the opto
-     * outputs off; in stage 0 the opto pins are deliberately left untouched. */
+    /* Invariant 1: the opto outputs are forced off before anything else runs. */
+    opto_force_off();
     board_early_init();
 
     const esp_app_desc_t *app = esp_app_get_description();

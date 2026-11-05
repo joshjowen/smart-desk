@@ -75,6 +75,7 @@ progress{width:100%}
     <div class="jog"><button id="up" aria-label="Up">▲</button><button id="down" aria-label="Down">▼</button></div>
     <p class="hint">Hold to move. Releasing stops the desk.</p>
     <div class="presets" id="presetBtns"></div>
+    <p class="hint" id="presetHint" hidden>Presets need the height sensor and calibration (coming in a later stage).</p>
     <button class="stop" id="stop">STOP</button>
   </div>
 </section>
@@ -232,6 +233,7 @@ function render(s) {
     s.presets.forEach(p => { const b = document.createElement('button'); b.dataset.id = p.id; b.innerHTML = '<b></b><small></small>'; b.firstChild.textContent = p.name; b.lastChild.textContent = fmt(p.mm, s.units) + ' ' + s.units; b.onclick = () => send({ cmd: 'preset', id: p.id }); pb.appendChild(b); });
   }
   pb.querySelectorAll('button').forEach(b => b.disabled = !canMove || !s.presets_available);
+  $('presetHint').hidden = s.presets_available;
 
   if (lastErrSeq !== null && s.last_error_seq !== lastErrSeq && s.last_error) toast(s.last_error);
   lastErrSeq = s.last_error_seq;

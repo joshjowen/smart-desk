@@ -554,7 +554,11 @@ static void render_status(const motion_status_t *st)
     for (int i = 0; i < 2; i++) {
         int32_t mm = st->preset_mm[i];
         fmt_height(h, sizeof(h), mm > 0, mm);
-        snprintf(pl, sizeof(pl), "%s\n%s", s_cfg.preset_name[i], h);
+        if (st->presets_available) {
+            snprintf(pl, sizeof(pl), "%s\n%s", s_cfg.preset_name[i], h);
+        } else {
+            snprintf(pl, sizeof(pl), "%s\nneeds cal.", s_cfg.preset_name[i]);
+        }
         lv_label_set_text(lbls[i], pl);
         lv_obj_set_state(btns[i], LV_STATE_DISABLED, !presets_ok || mm <= 0);
     }

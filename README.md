@@ -4,8 +4,8 @@ ESP-IDF firmware for a Waveshare ESP32-C6-Touch-LCD-1.47 that drives an Otto Cha
 simulating handset button presses through PC817 optocouplers. The full plan is in
 [desk-controller-spec.md](desk-controller-spec.md); progress is in [CHANGELOG.md](CHANGELOG.md).
 
-**Current stage: 1 (Wi-Fi and web interface, simulated desk).** The opto GPIOs (3 and 7) are not
-configured or driven by this firmware yet.
+**Current stage: 2 (real desk, hold-to-run only, no height sensor).** The optos are driven in source
+mode (GPIO high = button pressed). Presets are disabled until the height sensor is calibrated.
 
 ## Build and flash
 
@@ -84,6 +84,29 @@ The board's USB port gives a `desk>` prompt (e.g. through `idf.py monitor`):
 
 The duty ledger is kept in RTC memory, so it survives resets and crashes but not a power cycle.
 
+## Stage 2 bench test (do this before trusting the desk connection)
+
+1. Flash, then put a multimeter in continuity or diode mode across each opto output (V1–G, V2–G).
+   It must conduct only while the matching ▲ / ▼ button is held on the touchscreen.
+2. Reset the board, and power it up while holding BOOT. Neither output may conduct at any point
+   (watch the module's indicator LEDs too).
+3. Hold ▲ on the web page and close the tab: the output must drop within 300 ms.
+4. With the desk connected: it moves while ▲ / ▼ is held (touchscreen and web) and stops on release;
+   the original handset still works; no movement during power-up, reset, flashing or the `crash`
+   console command.
+5. Duty budget: `duty 110` on the console, then jog for ~10 s; the desk must stop and show the cooldown
+   countdown. `duty clear` resets it.
+
+Console commands and the log show every output change with time, source and reason
+(`OUT OFF -> UP src=TOUCH reason=jog`).
+
+Polarity and pins are Kconfig options (`Desk motion`): `DESK_OPTO_ACTIVE_LOW` (sink mode),
+`DESK_OPTO_UP_GPIO`, `DESK_OPTO_DOWN_GPIO`. `DESK_SIMULATOR` brings back the simulated desk (outputs
+held off). `DESK_HANDSET_SENSE` (off) reads the handset lines to detect physical presses.
+
+The 10 kΩ pull-downs on GPIO3/GPIO7 are not fitted yet. The firmware enables the internal pull-downs
+once it is running, but nothing holds the pins low while the chip is in reset.
+
 ## Wiring
 
 Pin numbers come from [main/board_config.h](main/board_config.h).
@@ -93,11 +116,11 @@ Pin numbers come from [main/board_config.h](main/board_config.h).
 | 29 V supply | Desk control box DC input | Y-split on the barrel lead |
 | 29 V supply | Buck converter input | Buck rated 36 V input or more |
 | Buck 5 V / GND | ESP32 board 5V / GND | |
-| Handset cable UP line | PC817 module U1 output | In parallel with the handset button |
-| Handset cable DOWN line | PC817 module U2 output | |
+| Handset cable UP line | PC817 module V1 | In parallel with the handset button |
+| Handset cable DOWN line | PC817 module V2 | |
 | Handset cable GND | PC817 module output G | Desk GND |
-| ESP32 GPIO3 (UP) | PC817 module IN1 | Source mode; 10 kΩ pull-down on the GPIO |
-| ESP32 GPIO7 (DOWN) | PC817 module IN2 | 10 kΩ pull-down on the GPIO |
+| ESP32 GPIO3 (UP) | PC817 module I1 | Source mode; 10 kΩ pull-down on the GPIO (recommended, not yet fitted) |
+| ESP32 GPIO7 (DOWN) | PC817 module I2 | 10 kΩ pull-down on the GPIO (recommended, not yet fitted) |
 | ESP32 GND | PC817 module input G | |
 | ESP32 3V3 / GND | VL53L0X VIN / GND | Stage 3 |
 | ESP32 GPIO18 / GPIO19 | VL53L0X SDA / SCL | Shared onboard I2C bus (stage 3) |

@@ -1,7 +1,7 @@
 /*
- * Motion controller task. Owns the desk outputs (simulated in stage 0) and
- * enforces the safety invariants from the spec:
- *   1  outputs off at boot / shutdown            (sim: shutdown handler)
+ * Motion controller task. Owns the desk outputs and enforces the safety
+ * invariants from the spec:
+ *   1  outputs off at boot (opto_force_off), shutdown handler, panic hook
  *   2  never UP and DOWN together; 300 ms off before a direction change
  *   3  hold-to-run: jog stops 300 ms after the last heartbeat
  *   4  max single move time -> FAULT
@@ -22,7 +22,9 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
+#include "driver/gpio.h"
 #include "duty.h"
+#include "opto.h"
 
 static const char *TAG = "motion";
 
@@ -66,6 +68,7 @@ static int32_t s_preset_mm[MOTION_PRESET_COUNT] = {
 
 /* ---- height source / output backend ---- */
 #if CONFIG_DESK_SIMULATOR
+/* Simulated desk. The real outputs were forced off by opto_force_off() and stay off. */
 static float s_sim_mm = CONFIG_DESK_SIM_START_MM;
 static volatile motion_dir_t s_sim_dir = MOTION_DIR_NONE;
 static const int32_t s_min_mm = CONFIG_DESK_SIM_MIN_MM + END_STOP_MARGIN_MM;
@@ -94,8 +97,50 @@ static bool height_read(int32_t *mm)
     return true;
 }
 #else
-#error "Real opto outputs arrive in stage 2; enable CONFIG_DESK_SIMULATOR"
+/* Real desk through the optos. No height sensor until stage 3 / calibration in
+ * stage 4: height is unknown and only hold-to-run jogging is possible. The range
+ * is only used to sanity-check preset values entered in the settings. */
+static const int32_t s_min_mm = 500;
+static const int32_t s_max_mm = 1400;
+static const bool s_calibrated = false;
+
+static void hw_set(motion_dir_t d)
+{
+    opto_set(d);
+}
+
+static void hw_tick(uint32_t dt_ms)
+{
+}
+
+static bool height_read(int32_t *mm)
+{
+    *mm = 0;
+    return false;
+}
 #endif
+
+/* ---- optional handset sense ---- */
+#if CONFIG_DESK_HANDSET_SENSE
+#define HS_IGNORE_AFTER_OFF_US (150 * 1000)   /* our own opto pulls the line low too */
+static int s_hs_pins[2] = { CONFIG_DESK_HANDSET_UP_GPIO, CONFIG_DESK_HANDSET_DOWN_GPIO };
+static bool s_hs_raw[2], s_hs_pressed[2];
+
+static void handset_init(void)
+{
+    for (int i = 0; i < 2; i++) {
+        if (s_hs_pins[i] < 0) {
+            continue;
+        }
+        const gpio_config_t c = { .pin_bit_mask = BIT64(s_hs_pins[i]), .mode = GPIO_MODE_INPUT };
+        gpio_config(&c);
+    }
+    ESP_LOGI(TAG, "handset sense on UP=GPIO%d DOWN=GPIO%d", s_hs_pins[0], s_hs_pins[1]);
+}
+#endif
+
+static void handle(const motion_req_t *r);
+static void enter_fault(const char *text);
 
 static const int64_t s_max_move_us = (int64_t)CONFIG_DESK_MAX_MOVE_S_UNCAL * 1000000;
 
@@ -313,6 +358,34 @@ static void step(uint32_t dt_ms)
         duty_add_ms(dt_ms);
     }
 
+#if CONFIG_DESK_HANDSET_SENSE
+    /* Debounced over two 20 ms ticks. A line is ignored while our own output for
+     * that direction is on (and briefly after), since the opto pulls it too. */
+    for (int i = 0; i < 2; i++) {
+        if (s_hs_pins[i] < 0) {
+            continue;
+        }
+        motion_dir_t d = i == 0 ? MOTION_DIR_UP : MOTION_DIR_DOWN;
+        bool ours = s_out == d || (s_last_dir == d && now - s_off_since_us < HS_IGNORE_AFTER_OFF_US);
+        bool raw = gpio_get_level(s_hs_pins[i]) == (CONFIG_DESK_HANDSET_ACTIVE_LOW ? 0 : 1);
+        bool stable = raw == s_hs_raw[i];
+        s_hs_raw[i] = raw;
+        if (!stable || ours || raw == s_hs_pressed[i]) {
+            continue;
+        }
+        s_hs_pressed[i] = raw;
+        ESP_LOGI(TAG, "HANDSET %s %s", dir_name(d), raw ? "pressed" : "released");
+        if (raw && moving_state() && s_state != MOTION_JOG) {
+            motion_req_t stop = { .type = MOTION_REQ_STOP, .source = MOTION_SRC_HANDSET };
+            handle(&stop);
+        }
+    }
+    /* The handset moves the motor too: count it against the duty budget. */
+    if (s_out == MOTION_DIR_NONE && (s_hs_pressed[0] || s_hs_pressed[1])) {
+        duty_add_ms(dt_ms);
+    }
+#endif
+
     /* Invariant 4: max single move time. */
     if (s_out != MOTION_DIR_NONE && now - s_on_since_us > s_max_move_us) {
         enter_fault("Move took too long");
@@ -413,14 +486,21 @@ static void motion_task(void *arg)
 
 static void shutdown_outputs_off(void)
 {
-    hw_set(MOTION_DIR_NONE);
+    opto_set(MOTION_DIR_NONE);
 }
 
 esp_err_t motion_init(void)
 {
+    opto_force_off();   /* already done first thing in app_main; repeat to be sure */
     hw_set(MOTION_DIR_NONE);
+    opto_log_config();
 #if CONFIG_DESK_SIMULATOR
-    ESP_LOGW(TAG, "SIMULATED desk: opto GPIOs are not configured or driven");
+    ESP_LOGW(TAG, "SIMULATED desk: real outputs held off");
+#else
+    ESP_LOGW(TAG, "REAL desk: hold-to-run only, max move %d s, no height sensor", CONFIG_DESK_MAX_MOVE_S_UNCAL);
+#endif
+#if CONFIG_DESK_HANDSET_SENSE
+    handset_init();
 #endif
     duty_init();
     s_q = xQueueCreate(QUEUE_LEN, sizeof(motion_req_t));
