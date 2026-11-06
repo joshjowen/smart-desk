@@ -142,6 +142,10 @@ typedef struct {
         bool corrected;
     } last_seek;
     float coast_up_mm, coast_down_mm;   /* learned coast in desk mm (what seeks use) */
+    /* A remote (MQTT) move waiting for its on-screen countdown. */
+    bool pending_active;
+    int32_t pending_target_mm;
+    uint32_t pending_remaining_ms;
 } motion_status_t;
 
 esp_err_t motion_init(void);
@@ -203,8 +207,14 @@ void motion_set_presets(const int32_t mm[MOTION_PRESET_COUNT]);
 /* Usable height range for seeks and presets. */
 void motion_get_range(int32_t *min_mm, int32_t *max_mm);
 
-/* True while the desk is under automatic control (SEEK / SETTLE / CALIBRATING). */
+/* True while the desk is under automatic control (SEEK / SETTLE / CALIBRATING) or a
+ * remote move is counting down: a touch anywhere then means STOP. */
 bool motion_is_automatic(void);
+
+/* Countdown before an MQTT-started move (0-10 s). A touch or STOP during it cancels. */
+void motion_set_remote_countdown(uint32_t seconds);
+/* Records an error from outside motion (e.g. a refused MQTT command) as last_error. */
+void motion_note_error(const char *why);
 
 const char *motion_state_name(motion_state_t s);
 const char *motion_source_name(motion_source_t s);

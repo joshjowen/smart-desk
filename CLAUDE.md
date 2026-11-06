@@ -31,8 +31,8 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 - **Stage 3 (VL53L0X raw readings): done and accepted on the desk** (hot-unplug test done later).
 - **Stage 4 (calibration): done and accepted on the desk** (display flow, touch cancel, Correct height
   and a full run from the screen tested by Josh).
-- **Stage 5 (presets): done and accepted.** 10 Sit/Stand seeks within ±5 mm. Waiting for Josh to say
-  go before stage 6 (MQTT / Home Assistant).
+- **Stage 5 (presets): done and accepted.** 10 Sit/Stand seeks within ±5 mm.
+- **Stage 6 (MQTT / Home Assistant): done and accepted** with Josh's HA. All stages of the spec are done.
 - The control box has its own protection that locks the desk out after heavy use (stricter than the
   firmware's 120 s / 20 min); only a power cycle of the box clears it. Don't run long motor tests;
   Josh doesn't want exhaustive hardware test runs. If the desk stops responding, it's this (or a loose
@@ -41,7 +41,7 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
   duty budget; "Correct height" (scale factor) is an addition (README "Calibration").
 - Reflashing restarts the duty ledger's expiry (up to 20 min before budget frees up): plan motor tests
   around flashes.
-- Stage 6 not started.
+- MQTT broker details live only in the desk's settings (entered by Josh): never put them in the repo or logs.
 - Firmware really moves the desk. Josh has said it is safe for Claude to drive it (2026-11-06): the
   control box stops by itself at both end stops. Jog over the WebSocket (`jog` + `hb` every 100 ms,
   then `stop`). Keep the heartbeat in its own task: a blocking HTTP/mDNS call in the same loop starves
@@ -91,6 +91,7 @@ components/height     sensor task: filter (median 5 + EMA), 60 s history, offlin
 components/motion     calib.c = calibration routine (runs in the motion task);
                       motion state machine + safety invariants + duty ledger (duty.c); simulator in stages 0-1
 components/config     typed settings blob in NVS (versioned), admin password (PBKDF2), listeners
+components/mqtt_ha    MQTT client, HA discovery, commands (moves via motion's pending countdown)
 components/net        Wi-Fi STA + setup AP fallback, captive DNS (dns_captive.c), mDNS, SNTP
 components/web        httpd: page + WebSocket (web.c), REST API + OTA (web_api.c)
 components/ui         LVGL screens (single ui.c)
@@ -135,6 +136,9 @@ tools/serlog.py       serial capture helper
 - ESP-IDF 5.5 httpd does NOT call the WebSocket URI handler for the handshake; use
   `ws_post_handshake_cb` (`CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT`).
 - With `server_from_dhcp`, SNTP must be started explicitly (`esp_netif_sntp_start`).
-- Config struct: only append fields and bump `CONFIG_VERSION`; older blobs load as a prefix.
+- Config struct: only append fields and bump `CONFIG_VERSION`; older blobs load as a prefix. **Set each
+  new field's default explicitly for older versions in `config_init`**: a small field can land in the
+  old struct's trailing padding (saved as zeros), so the prefix load gives 0, not the default (bit
+  the v4 MQTT countdown).
 - Library versions: LVGL 9.6, esp_lvgl_port 2.9, esp_lcd_touch 1.2 (older pins didn't compile together).
   LVGL 9.6 deprecates `lv_obj_add_flag`/`remove_flag` — warnings only, cleanup pending.

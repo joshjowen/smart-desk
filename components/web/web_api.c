@@ -37,6 +37,7 @@
 #include "ui.h"
 #include "board.h"
 #include "height.h"
+#include "mqtt_ha.h"
 #include "vl53l0x.h"
 #include "web_priv.h"
 
@@ -481,6 +482,10 @@ static cJSON *config_json(const desk_config_t *c)
     cJSON_AddStringToObject(m, "username", c->mqtt_user);
     cJSON_AddBoolToObject(m, "password_set", c->mqtt_pass[0] != 0);
     cJSON_AddStringToObject(m, "device_id", c->mqtt_device_id);
+    cJSON_AddNumberToObject(m, "countdown_s", c->mqtt_countdown_s);
+    char *ca = malloc(CFG_MQTT_CA_MAX);
+    cJSON_AddBoolToObject(m, "ca_set", ca && config_text_load("mqtt_ca", ca, CFG_MQTT_CA_MAX) == ESP_OK && ca[0]);
+    free(ca);
     cJSON_AddBoolToObject(o, "allow_remote_moves", c->allow_remote_moves);
     cJSON *sn = cJSON_AddObjectToObject(o, "sensor");
     cJSON_AddStringToObject(sn, "profile", c->sensor_profile ? "accurate" : "default");
@@ -589,6 +594,23 @@ static bool merge_config(const cJSON *o, desk_config_t *c, char *err, size_t el)
         if (!take_str(m, "username", c->mqtt_user, sizeof(c->mqtt_user), "MQTT username", err, el)) return false;
         if (!take_str(m, "password", c->mqtt_pass, sizeof(c->mqtt_pass), "MQTT password", err, el)) return false;
         if (!take_str(m, "device_id", c->mqtt_device_id, sizeof(c->mqtt_device_id), "MQTT device ID", err, el)) return false;
+        int32_t cd = c->mqtt_countdown_s;
+        if (!take_int(m, "countdown_s", &cd, 0, 10, "MQTT move countdown (s)", err, el)) return false;
+        c->mqtt_countdown_s = cd;
+        const cJSON *ca = cJSON_GetObjectItem(m, "ca");
+        if (ca) {
+            /* Saved before the settings so the MQTT listener sees the new CA. */
+            if (!cJSON_IsString(ca) || strlen(ca->valuestring) >= CFG_MQTT_CA_MAX ||
+                (ca->valuestring[0] && !strstr(ca->valuestring, "-----BEGIN CERTIFICATE-----"))) {
+                snprintf(err, el, "MQTT CA: paste a PEM certificate (or leave it empty)");
+                return false;
+            }
+            esp_err_t e = config_text_save("mqtt_ca", ca->valuestring);
+            if (e != ESP_OK) {
+                snprintf(err, el, "MQTT CA: saving failed (%s)", esp_err_to_name(e));
+                return false;
+            }
+        }
     }
     const cJSON *sn = cJSON_GetObjectItem(o, "sensor");
     if (sn) {
@@ -799,6 +821,15 @@ static esp_err_t system_get(httpd_req_t *req)
     cJSON_AddStringToObject(o, "ap_ssid", n.ap_ssid);
     cJSON_AddBoolToObject(o, "time_synced", n.time_synced);
     cJSON_AddStringToObject(o, "last_fault", st.last_fault);
+    mqtt_ha_status_t mq;
+    mqtt_ha_get_status(&mq);
+    cJSON *mj = cJSON_AddObjectToObject(o, "mqtt");
+    cJSON_AddStringToObject(mj, "state", mq.state == MQTT_HA_OFF ? "off" : mq.state == MQTT_HA_CONNECTED ? "connected" : "connecting");
+    cJSON_AddStringToObject(mj, "broker", mq.broker);
+    cJSON_AddStringToObject(mj, "base_topic", mq.base_topic);
+    cJSON_AddStringToObject(mj, "error", mq.error);
+    cJSON_AddNumberToObject(mj, "retry_in_s", mq.retry_in_s);
+    cJSON_AddNumberToObject(mj, "connects", mq.connects);
     cJSON_AddNumberToObject(o, "duty_remaining_s", st.duty_remaining_s);
     return web_send_json(req, 200, o);
 }

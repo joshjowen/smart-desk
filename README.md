@@ -4,9 +4,9 @@ ESP-IDF firmware for a Waveshare ESP32-C6-Touch-LCD-1.47 that drives an Otto Cha
 simulating handset button presses through PC817 optocouplers. The full plan is in
 [desk-controller-spec.md](desk-controller-spec.md); progress is in [CHANGELOG.md](CHANGELOG.md).
 
-**Current stage: 5 (presets).** The optos are driven in source mode (GPIO high = button pressed). After
-calibration the display and web show the desktop height, and the presets drive the desk there on their
-own.
+**All stages done (6: MQTT / Home Assistant).** The optos are driven in source mode (GPIO high = button
+pressed). After calibration the display and web show the desktop height, the presets drive the desk
+there on their own, and the desk appears in Home Assistant through MQTT discovery.
 
 ## Build and flash
 
@@ -50,7 +50,7 @@ Factory reset (System tab) erases all settings.
 - **Control**: live height and state, hold ▲/▼ to move (stops on release, tab close or lost
   connection), preset buttons, STOP.
 - **Settings**: Wi-Fi, hostname, time server, presets, display units and timeouts, backlight, MQTT
-  (used from stage 6), and **Allow remote moves**. With it off (the default), the web page can only move
+  (broker, login, device ID, move countdown, optional TLS CA), and **Allow remote moves**. With it off (the default), the web page can only move
   the desk while the desk's screen is unlocked. STOP always works.
 - **Sensor**: VL53L0X diagnostics: filtered and raw distance, range status, signal and ambient rate,
   samples per second, standard deviation over 2 s, a plot of the last 30 s (raw dots, filtered line,
@@ -247,6 +247,34 @@ firmware's 120 s per 20 min budget. Both times the stall check stopped driving w
 raised "Desk not moving (stall)". If that fault appears with no obstruction, power-cycle the control
 box. Lowering `DESK_DUTY_MAX_ON_S` would make the firmware rest the desk before the box does.
 
+## Home Assistant / MQTT (stage 6)
+
+Set the broker in Settings > MQTT (`mqtt://host:1883` or `mqtts://host:8883`; for `mqtts://` paste the
+broker's CA, or leave it empty to use the built-in public CA list). The device ID defaults to the
+hostname. The client reconnects with back-off from 1 s up to 60 s, and straight away when Wi-Fi comes
+back. The MQTT label on the display is lit while connected; System shows the state and last error.
+
+| Topic | |
+| --- | --- |
+| `desk/<id>/status` | `online` / `offline`, retained (last will) |
+| `desk/<id>/state` | retained JSON: `height_mm`, `state`, `target_mm`, `fault`, `duty_remaining_s`, `locked`, `remote_moves_allowed`, `last_error`, `calibrated`, `pending_target_mm`; 2 Hz while moving, on change (height ≥ 5 mm when idle), every 60 s |
+| `desk/<id>/cmd` | `{"cmd":"preset","id":"stand"}` (sit, stand, custom1, custom2), `{"cmd":"goto","mm":1080}`, `{"cmd":"stop"}` |
+| `homeassistant/<component>/<id>_<object>/config` | discovery, retained; republished when HA sends `online` on `homeassistant/status` |
+
+Entities (one device, with a link to `http://<hostname>.local`): Height, Target height (number,
+calibrated range, step 10 mm), one button per enabled preset, Stop, State, Moving, Fault (with the fault
+text as an attribute), and diagnostics Duty budget remaining, Remote moves allowed, Last error.
+
+Rules: Stop is always accepted. Preset / goto need **Allow remote moves**; otherwise they are refused
+and the reason shows as Last error. At most one move command per 2 s. No jogging over MQTT. A move
+starts only after a countdown on the desk screen (default 3 s, 0-10 s in Settings); a tap on the
+screen, or STOP from anywhere, cancels it. A move that is running carries on if Wi-Fi or the broker
+drops.
+
+Tested with Josh's Home Assistant: device and entities appear by themselves and survive an HA
+restart; Stand / Sit after the countdown; tap cancels the countdown; HA Stop stops a move; with
+remote moves off nothing moves and Last error explains why; reconnects after a reboot.
+
 ## Wiring
 
 Pin numbers come from [main/board_config.h](main/board_config.h).
@@ -283,6 +311,7 @@ components/
   height/        sensor task, filter, 60 s history
   ui/            LVGL screens
   config/        settings in NVS
+  mqtt_ha/       MQTT client, Home Assistant discovery, commands
   net/           Wi-Fi, setup AP + captive DNS, mDNS, SNTP
   web/           HTTP server, REST API, WebSocket, OTA
 web/index.html   the web app (gzipped into the firmware at build time)

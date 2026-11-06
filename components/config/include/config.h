@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define CONFIG_VERSION      3
+#define CONFIG_VERSION      4
 #define CFG_PRESET_COUNT    4   /* sit, stand, custom1, custom2 (same order as motion_preset_t) */
 
 typedef struct {
@@ -59,6 +59,9 @@ typedef struct {
     /* --- v3 --- height sensor */
     uint8_t sensor_profile;    /* height_profile_t: 0 default (50 ms), 1 high accuracy (200 ms) */
     uint8_t sensor_ema_pct;    /* filter EMA alpha in percent */
+
+    /* --- v4 --- MQTT */
+    uint8_t mqtt_countdown_s;  /* on-screen countdown before an MQTT-started move, 0-10 */
 } desk_config_t;
 
 typedef void (*config_listener_t)(const desk_config_t *cfg);
@@ -77,11 +80,17 @@ void config_add_listener(config_listener_t fn);
 bool config_admin_check(const char *password);
 esp_err_t config_admin_set(const char *password);   /* NULL or "" clears it */
 
+#define CFG_MQTT_CA_MAX  4096   /* PEM, stored as the "mqtt_ca" record */
+
 /* Other records in the settings namespace (e.g. the calibration). load fails
  * with ESP_ERR_INVALID_SIZE if the stored size differs from `len`. Erased by a
  * factory reset. */
 esp_err_t config_blob_load(const char *key, void *buf, size_t len);
 esp_err_t config_blob_save(const char *key, const void *buf, size_t len);
+
+/* Text records (e.g. "mqtt_ca"). An empty string erases the record. */
+esp_err_t config_text_load(const char *key, char *buf, size_t len);
+esp_err_t config_text_save(const char *key, const char *text);
 
 /* Erases all settings (factory reset). Caller reboots afterwards. */
 esp_err_t config_factory_reset(void);

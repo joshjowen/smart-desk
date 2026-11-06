@@ -21,6 +21,9 @@ void ui_apply_config(const desk_config_t *cfg);
  * unless remote moves are allowed). */
 bool ui_is_locked(void);
 
+/* MQTT indicator in the status row: 0 = not configured (hidden), 1 = connecting, 2 = connected. */
+void ui_set_mqtt_state(int state);
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,6 +11,7 @@
 #include "board.h"
 #include "motion.h"
 #include "height.h"
+#include "mqtt_ha.h"
 #include "opto.h"
 #include "ui.h"
 #include "console.h"
@@ -48,6 +49,8 @@ static void on_config_changed(const desk_config_t *c)
     ui_apply_config(c);
     net_apply_config(c);
     height_set_params(c->sensor_profile, c->sensor_ema_pct);
+    motion_set_remote_countdown(c->mqtt_countdown_s);
+    mqtt_ha_apply_config(c);
 }
 
 static void on_cal_saved(const motion_cal_t *c)
@@ -152,6 +155,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(net_start(&cfg));
     ESP_ERROR_CHECK(web_start());
+    motion_set_remote_countdown(cfg.mqtt_countdown_s);
+    if (mqtt_ha_start(&cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT failed to start");
+    }
     config_add_listener(on_config_changed);
 
     /* OTA probation: mark this image good once it has run for a while. */

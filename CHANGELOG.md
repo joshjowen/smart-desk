@@ -1,5 +1,23 @@
 # Changelog
 
+## Stage 6: MQTT interface (0.6.0) — 2026-11-06
+
+- `mqtt_ha`: esp-mqtt client (broker, login, optional TLS CA or the built-in CA bundle), last will
+  `offline`, reconnect back-off 1-60 s and an immediate retry when Wi-Fi comes back.
+- Retained state JSON (2 Hz while moving, on change, 60 s keep-alive), Home Assistant discovery for
+  Height, Target height, preset buttons, Stop, State, Moving, Fault, Duty budget remaining, Remote moves
+  allowed and Last error; republished on `homeassistant/status` = `online` and when presets or the
+  calibration change (disabled presets are removed).
+- Commands: stop (always), preset, goto. Moves need "Allow remote moves", one per 2 s, no jog, and
+  start after an on-screen countdown (settings v4: 0-10 s, default 3) that a tap or STOP cancels. The
+  countdown is held in `motion`. Refused commands show as Last error (`motion_note_error`).
+- Display: MQTT indicator lit while connected; countdown overlay. Web: countdown and CA fields, MQTT
+  status on System.
+- Fix: settings migration now sets new fields' defaults explicitly (the v4 countdown landed in the v3
+  struct's padding and loaded as 0).
+- Tested with Josh's Home Assistant (discovery, HA restart, countdown, tap cancel, Stop, remote moves
+  off, reconnect).
+
 ## Stage 5: Enable presets (0.5.0) — 2026-11-06
 
 - Seeks: release early by the learned coast + 2 mm, settle (< 2 mm over 500 ms, max 2 s), at most one

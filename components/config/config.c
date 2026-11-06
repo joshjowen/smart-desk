@@ -51,6 +51,7 @@ static void defaults(desk_config_t *c)
     c->allow_remote_moves = false;
     c->sensor_profile = 0;
     c->sensor_ema_pct = CONFIG_DESK_HEIGHT_EMA_PCT;
+    c->mqtt_countdown_s = 3;
 }
 
 static esp_err_t save(const desk_config_t *c)
@@ -95,6 +96,17 @@ esp_err_t config_init(void)
                 stored.version <= CONFIG_VERSION) {
                 if (stored.version != CONFIG_VERSION) {
                     ESP_LOGW(TAG, "migrating settings v%lu -> v%d", (unsigned long)stored.version, CONFIG_VERSION);
+                    /* A small appended field can land in the old struct's trailing
+                     * padding, which was saved as zeros: set new fields explicitly. */
+                    desk_config_t def;
+                    defaults(&def);
+                    if (stored.version < 3) {
+                        stored.sensor_profile = def.sensor_profile;
+                        stored.sensor_ema_pct = def.sensor_ema_pct;
+                    }
+                    if (stored.version < 4) {
+                        stored.mqtt_countdown_s = def.mqtt_countdown_s;
+                    }
                 }
                 s_cfg = stored;
                 s_cfg.version = CONFIG_VERSION;
@@ -174,6 +186,7 @@ static bool validate(const desk_config_t *c, const desk_config_t *cur, char *err
     for (const char *p = c->ntp_server; *p; p++) {
         if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) FAIL("Time server: a hostname or IP address");
     }
+    if (c->mqtt_countdown_s > 10) FAIL("MQTT move countdown: 0-10 s");
     if (c->sensor_profile > 1) FAIL("Sensor profile: default or high accuracy");
     if (c->sensor_ema_pct < CFG_EMA_MIN || c->sensor_ema_pct > CFG_EMA_MAX)
         FAIL("Filter alpha: %.2f-%.2f", CFG_EMA_MIN / 100.0, CFG_EMA_MAX / 100.0);
@@ -274,6 +287,43 @@ esp_err_t config_blob_save(const char *key, const void *buf, size_t len)
         return err;
     }
     err = nvs_set_blob(h, key, buf, len);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t config_text_load(const char *key, char *buf, size_t len)
+{
+    nvs_handle_t h;
+    buf[0] = 0;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    size_t n = len;
+    err = nvs_get_str(h, key, buf, &n);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        buf[0] = 0;
+    }
+    return err;
+}
+
+esp_err_t config_text_save(const char *key, const char *text)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (text && text[0]) {
+        err = nvs_set_str(h, key, text);
+    } else {
+        err = nvs_erase_key(h, key);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }

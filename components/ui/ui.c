@@ -114,6 +114,9 @@ static lv_obj_t *s_lbl_sit, *s_lbl_stand;
 static lv_obj_t *s_ov_cool, *s_ov_cool_time;
 static lv_obj_t *s_ov_fault, *s_ov_fault_text;
 static lv_obj_t *s_toast;
+static lv_obj_t *s_ov_pend, *s_ov_pend_text, *s_ov_pend_time;
+static volatile int s_mqtt_state;
+static int s_mqtt_shown = -1;
 static lv_timer_t *s_toast_timer;
 
 static motion_status_t s_last;
@@ -1009,6 +1012,17 @@ static void build_overlays(void)
     lv_obj_center(al);
     lv_obj_add_event_cb(ack, fault_ack_cb, LV_EVENT_CLICKED, NULL);
 
+    /* Remote (MQTT) move countdown: any touch cancels it (touch_read_cb sends STOP). */
+    s_ov_pend = make_overlay(COL_SEEK);
+    lv_obj_t *pt = make_label(s_ov_pend, &lv_font_montserrat_20, COL_SEEK, "Home Assistant");
+    lv_obj_align(pt, LV_ALIGN_TOP_MID, 0, 10);
+    s_ov_pend_text = make_label(s_ov_pend, &lv_font_montserrat_20, COL_TEXT, "");
+    lv_obj_align(s_ov_pend_text, LV_ALIGN_TOP_MID, 0, 40);
+    s_ov_pend_time = make_label(s_ov_pend, &lv_font_montserrat_48, COL_TEXT, "");
+    lv_obj_align(s_ov_pend_time, LV_ALIGN_CENTER, 0, 14);
+    lv_obj_t *pc = make_label(s_ov_pend, &lv_font_montserrat_20, COL_DIM, "Tap to cancel");
+    lv_obj_align(pc, LV_ALIGN_BOTTOM_MID, 0, -10);
+
     /* Toast */
     s_toast = make_label(lv_layer_top(), &lv_font_montserrat_14, COL_TEXT, "");
     lv_obj_set_style_bg_color(s_toast, COL_PANEL_HI, 0);
@@ -1093,6 +1107,17 @@ static void render_status(const motion_status_t *st)
     } else {
         lv_obj_add_flag(s_ov_cool, LV_OBJ_FLAG_HIDDEN);
     }
+    if (st->pending_active) {
+        char t[48], h[16];
+        fmt_height(h, sizeof(h), true, st->pending_target_mm);
+        snprintf(t, sizeof(t), "Moving to %s %s in", h, unit_str());
+        lv_label_set_text(s_ov_pend_text, t);
+        snprintf(t, sizeof(t), "%lu", (unsigned long)((st->pending_remaining_ms + 999) / 1000));
+        lv_label_set_text(s_ov_pend_time, t);
+        lv_obj_remove_flag(s_ov_pend, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_ov_pend, LV_OBJ_FLAG_HIDDEN);
+    }
     if (st->state == MOTION_FAULT) {
         lv_label_set_text(s_ov_fault_text, st->fault);
         lv_obj_remove_flag(s_ov_fault, LV_OBJ_FLAG_HIDDEN);
@@ -1144,14 +1169,24 @@ static void status_timer_cb(lv_timer_t *t)
             toast(m);
         }
         /* Wake the screen when something needs attention. */
-        if (s_have_last && st.state != s_last.state &&
-            (st.state == MOTION_FAULT || st.state == MOTION_SEEK || st.state == MOTION_COOLDOWN)) {
+        if (s_have_last && ((st.state != s_last.state &&
+            (st.state == MOTION_FAULT || st.state == MOTION_SEEK || st.state == MOTION_COOLDOWN)) ||
+            (st.pending_active && !s_last.pending_active))) {
             set_dimmed(false);
             s_last_touch_ms = s_locked_at_ms = now_ms();
         }
         render_status(&st);
         s_last = st;
         s_have_last = true;
+    }
+
+    if (s_mqtt_state != s_mqtt_shown) {
+        s_mqtt_shown = s_mqtt_state;
+        status_row_t *rows[2] = { &s_lock_row, &s_ctrl_row };
+        for (int i = 0; i < 2; i++) {
+            lv_obj_set_flag(rows[i]->mqtt, LV_OBJ_FLAG_HIDDEN, s_mqtt_shown == 0);
+            lv_obj_set_style_text_color(rows[i]->mqtt, s_mqtt_shown == 2 ? COL_TEXT : COL_OFF, 0);
+        }
     }
 
     int64_t now = now_ms();
@@ -1199,6 +1234,11 @@ static void perf_timer_cb(lv_timer_t *t)
 }
 
 /* ---------------- settings ---------------- */
+
+void ui_set_mqtt_state(int state)
+{
+    s_mqtt_state = state;
+}
 
 bool ui_is_locked(void)
 {

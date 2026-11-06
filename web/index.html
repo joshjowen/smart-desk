@@ -138,7 +138,11 @@ input.bad{border-color:var(--bad)}
     <div class="row"><div><label for="muser">Username</label><input id="muser" autocomplete="off"></div>
     <div><label for="mpass">Password</label><input id="mpass" type="password" placeholder="unchanged" autocomplete="new-password"></div></div>
     <label for="mdev">Device ID</label><input id="mdev" placeholder="same as hostname">
-    <p class="hint">Used from stage 6.</p>
+    <label for="mcd">Countdown before a Home Assistant move (s, 0-10)</label><input id="mcd" type="number" min="0" max="10">
+    <label for="mca">TLS CA certificate (for mqtts://, optional)</label>
+    <textarea id="mca" rows="3" style="width:100%;font:12px monospace;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);padding:8px" placeholder="unchanged"></textarea>
+    <label class="check"><input type="checkbox" id="mcaClear">Remove the stored CA</label>
+    <p class="hint">Home Assistant finds the desk by itself (MQTT discovery). Moves from it need "Allow remote moves" and start after the countdown on the desk screen, where a tap cancels them. Stop always works.</p>
   </div>
   <div class="card"><h2>Safety</h2>
     <label class="check"><input type="checkbox" id="remote">Allow remote moves</label>
@@ -324,6 +328,9 @@ async function loadConfig() {
   $('backlight').value = cfg.display.backlight; $('blv').textContent = cfg.display.backlight;
   $('muri').value = cfg.mqtt.uri; $('muser').value = cfg.mqtt.username; $('mpass').value = ''; $('mdev').value = cfg.mqtt.device_id;
   $('mpass').placeholder = cfg.mqtt.password_set ? 'unchanged' : 'none';
+  $('mcd').value = cfg.mqtt.countdown_s; $('mca').value = ''; $('mcaClear').checked = false;
+  $('mca').placeholder = cfg.mqtt.ca_set ? 'a CA is stored (paste a new one to replace it)' : 'none: mqtts:// uses the built-in public CA list';
+  $('mcaClear').parentElement.hidden = !cfg.mqtt.ca_set;
   $('remote').checked = cfg.allow_remote_moves;
   const rows = $('presetRows'); rows.innerHTML = '';
   cfg.presets.forEach((p, i) => {
@@ -370,11 +377,12 @@ $('cfgForm').onsubmit = async e => {
     wifi: { ssid: $('ssid').value.trim() }, hostname: $('hostname').value.trim(), ntp_server: $('ntp').value.trim(),
     presets: [...$('presetRows').children].map(r => ({ enabled: r.children[0].checked, name: r.children[1].value.trim(), mm: Number(r.children[2].value) })),
     display: { units: $('units').value, autolock_s: Number($('autolock').value), dim_s: Number($('dim').value), backlight: Number($('backlight').value) },
-    mqtt: { uri: $('muri').value.trim(), username: $('muser').value, device_id: $('mdev').value.trim() },
+    mqtt: { uri: $('muri').value.trim(), username: $('muser').value, device_id: $('mdev').value.trim(), countdown_s: Number($('mcd').value) },
     allow_remote_moves: $('remote').checked,
   };
   if ($('wpass').value) body.wifi.password = $('wpass').value;
   if ($('mpass').value) body.mqtt.password = $('mpass').value;
+  if ($('mca').value.trim()) body.mqtt.ca = $('mca').value.trim(); else if ($('mcaClear').checked) body.mqtt.ca = '';
   const wifiChanged = cfg && (body.wifi.ssid !== cfg.wifi.ssid || body.wifi.password);
   try {
     await putJSON('/api/config', body); await loadConfig();
@@ -533,6 +541,8 @@ async function loadSystem() {
     ['Free heap', Math.round(s.free_heap / 1024) + ' KB (min ' + Math.round(s.min_free_heap / 1024) + ' KB)'],
     ['Wi-Fi', s.connected ? s.ssid + ' (' + s.rssi + ' dBm)' : (s.ssid ? 'not connected to ' + s.ssid : 'not configured')],
     ['IP', s.ip || '—'], ['Setup AP', s.ap_active ? s.ap_ssid : 'off'], ['Clock', s.time_synced ? 'synced' : 'not synced'],
+    ['MQTT', s.mqtt.state === 'off' ? 'not configured' : s.mqtt.state === 'connected' ? 'connected (' + s.mqtt.base_topic + ')' :
+      'connecting' + (s.mqtt.error ? ': ' + s.mqtt.error : '') + (s.mqtt.retry_in_s ? ', retry in ' + s.mqtt.retry_in_s + ' s' : '')],
     ['Duty budget left', s.duty_remaining_s + ' s'], ['Last fault', s.last_fault || 'none'], ['Last reset', s.reset_reason],
   ];
   try {

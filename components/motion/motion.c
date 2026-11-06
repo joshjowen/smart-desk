@@ -72,6 +72,15 @@ static motion_dir_t s_jog_dir;
 static int64_t s_jog_deadline_us;
 static int32_t s_target_mm;
 
+/* remote (MQTT) move waiting for its countdown */
+static struct {
+    bool active;
+    int32_t target_mm;
+    int64_t at_us;
+    motion_req_t req;
+} s_pending_move;
+static volatile uint32_t s_remote_countdown_s = 3;
+
 /* seek sub-state (stage 5) */
 typedef enum { SK_APPROACH, SK_SETTLE1, SK_NUDGE, SK_SETTLE2 } seek_phase_t;
 static seek_phase_t s_sk;
@@ -219,10 +228,25 @@ const char *motion_source_name(motion_source_t s)
     return (unsigned)s < sizeof(n) / sizeof(n[0]) ? n[s] : "?";
 }
 
-static void reject(const motion_req_t *r, const char *why)
+static portMUX_TYPE s_err_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void set_last_error(const char *why)
 {
+    portENTER_CRITICAL(&s_err_lock);
     strlcpy(s_last_error, why, sizeof(s_last_error));
     s_last_error_seq++;
+    portEXIT_CRITICAL(&s_err_lock);
+}
+
+void motion_note_error(const char *why)
+{
+    set_last_error(why);
+    ESP_LOGW(TAG, "error noted: %s", why);
+}
+
+static void reject(const motion_req_t *r, const char *why)
+{
+    set_last_error(why);
     ESP_LOGW(TAG, "rejected req %d from %s: %s", r->type, motion_source_name(r->source), why);
 }
 
@@ -376,29 +400,33 @@ static void seek_done(int32_t h)
     set_state(MOTION_IDLE, "seek done");
 }
 
-static void start_seek(const motion_req_t *r, int32_t target)
+/* dry_run: only check (reject() on failure); returns true if a seek would start. */
+static bool start_seek_ex(const motion_req_t *r, int32_t target, bool dry_run)
 {
     int32_t h;
-    if (s_state == MOTION_FAULT) { reject(r, "Fault: acknowledge first"); return; }
-    if (s_state == MOTION_COOLDOWN) { reject(r, "Cooling down"); return; }
-    if (calib_blocks_moves()) { reject(r, "Finish or cancel calibration first"); return; }
-    if (!s_calibrated) { reject(r, "Needs calibration"); return; }
-    if (!SEEKS_ENABLED) { reject(r, "Presets arrive in stage 5"); return; }
-    if (!height_read(&h)) { reject(r, "Height sensor invalid"); return; }
+    if (s_state == MOTION_FAULT) { reject(r, "Fault: acknowledge first"); return false; }
+    if (s_state == MOTION_COOLDOWN) { reject(r, "Cooling down"); return false; }
+    if (calib_blocks_moves()) { reject(r, "Finish or cancel calibration first"); return false; }
+    if (!s_calibrated) { reject(r, "Needs calibration"); return false; }
+    if (!SEEKS_ENABLED) { reject(r, "Presets arrive in stage 5"); return false; }
+    if (!height_read(&h)) { reject(r, "Height sensor invalid"); return false; }
     if (target < s_min_mm || target > s_max_mm) {
         char m[48];
         snprintf(m, sizeof(m), "Target %ld mm is outside %ld-%ld mm", (long)target, (long)s_min_mm, (long)s_max_mm);
         reject(r, m);
-        return;
+        return false;
     }
-    if (duty_remaining_ms() < SEEK_MIN_BUDGET_MS) { reject(r, "Duty budget low"); return; }
+    if (duty_remaining_ms() < SEEK_MIN_BUDGET_MS) { reject(r, "Duty budget low"); return false; }
     if (abs(target - h) <= CONFIG_DESK_SEEK_TOLERANCE_MM) {
         ESP_LOGI(TAG, "seek to %ld: already there (%ld)", (long)target, (long)h);
-        if (moving_state()) {
+        if (!dry_run && moving_state()) {
             apply_output(MOTION_DIR_NONE, "seek: at target");
             set_state(MOTION_IDLE, "at target");
         }
-        return;
+        return false;
+    }
+    if (dry_run) {
+        return true;
     }
     s_src = r->source;
     s_target_mm = target;
@@ -408,6 +436,41 @@ static void start_seek(const motion_req_t *r, int32_t target)
     set_state(MOTION_SEEK, "seek request");
     ESP_LOGI(TAG, "seek %ld -> %ld mm src=%s (release %.1f mm early)", (long)h, (long)target,
              motion_source_name(r->source), coast_mm(s_sk_dir) + CONFIG_DESK_SEEK_MARGIN_MM);
+    return true;
+}
+
+static void pending_cancel(const char *why)
+{
+    if (s_pending_move.active) {
+        s_pending_move.active = false;
+        ESP_LOGI(TAG, "remote move to %ld mm cancelled (%s)", (long)s_pending_move.target_mm, why);
+    }
+}
+
+/* Seeks from MQTT start after an on-screen countdown (tap or STOP cancels). */
+static void start_seek(const motion_req_t *r, int32_t target)
+{
+    if (r->source != MOTION_SRC_MQTT) {
+        pending_cancel("replaced");
+        start_seek_ex(r, target, false);
+        return;
+    }
+    uint32_t cd = s_remote_countdown_s;
+    if (cd == 0) {
+        start_seek_ex(r, target, false);
+        return;
+    }
+    if (moving_state()) {
+        reject(r, "Desk is moving");
+        return;
+    }
+    if (start_seek_ex(r, target, true)) {
+        s_pending_move.active = true;
+        s_pending_move.target_mm = target;
+        s_pending_move.req = *r;
+        s_pending_move.at_us = esp_timer_get_time() + (int64_t)cd * 1000000;
+        ESP_LOGI(TAG, "remote move to %ld mm in %lu s (tap to cancel)", (long)target, (unsigned long)cd);
+    }
 }
 
 static void apply_calibration(const motion_cal_t *c, bool reset_learned);
@@ -450,6 +513,7 @@ static void handle(const motion_req_t *r)
     int64_t now = esp_timer_get_time();
     switch ((int)r->type) {
     case MOTION_REQ_STOP:
+        pending_cancel(motion_source_name(r->source));
         if (s_state == MOTION_CALIBRATING) {
             calib_abort("Calibration cancelled. The old calibration is kept.", true);
         }
@@ -466,6 +530,7 @@ static void handle(const motion_req_t *r)
         if (s_state == MOTION_FAULT) { reject(r, "Fault: acknowledge first"); break; }
         if (s_state == MOTION_COOLDOWN) { reject(r, "Cooling down"); break; }
         if (s_state == MOTION_CALIBRATING || calib_blocks_moves()) { reject(r, "Finish or cancel calibration first"); break; }
+        pending_cancel("jog");
         if (s_state != MOTION_JOG || s_jog_dir != d || s_src != r->source) {
             ESP_LOGI(TAG, "jog %s src=%s", dir_name(d), motion_source_name(r->source));
         }
@@ -771,6 +836,16 @@ static void step(uint32_t dt_ms)
         }
     }
 
+    /* A remote move whose countdown has run out: re-check everything and go. */
+    if (s_pending_move.active) {
+        if (s_state != MOTION_IDLE) {
+            pending_cancel(motion_state_name(s_state));
+        } else if (now >= s_pending_move.at_us) {
+            s_pending_move.active = false;
+            start_seek_ex(&s_pending_move.req, s_pending_move.target_mm, false);
+        }
+    }
+
     motion_dir_t want = MOTION_DIR_NONE;
     switch (s_state) {
     case MOTION_JOG:
@@ -904,14 +979,20 @@ static void step(uint32_t dt_ms)
         .max_mm = s_max_mm,
         .duty_remaining_s = rem / 1000,
         .cooldown_remaining_s = s_state == MOTION_COOLDOWN ? duty_wait_s_for(COOLDOWN_EXIT_MS) : 0,
-        .last_error_seq = s_last_error_seq,
     };
     portENTER_CRITICAL(&s_preset_lock);
     memcpy(st.preset_mm, s_preset_mm, sizeof(st.preset_mm));
     portEXIT_CRITICAL(&s_preset_lock);
     strlcpy(st.last_fault, s_last_fault, sizeof(st.last_fault));
     strlcpy(st.fault, s_state == MOTION_FAULT ? s_fault : "", sizeof(st.fault));
+    portENTER_CRITICAL(&s_err_lock);
     strlcpy(st.last_error, s_last_error, sizeof(st.last_error));
+    st.last_error_seq = s_last_error_seq;
+    portEXIT_CRITICAL(&s_err_lock);
+    st.pending_active = s_pending_move.active;
+    st.pending_target_mm = s_pending_move.target_mm;
+    st.pending_remaining_ms = s_pending_move.active && s_pending_move.at_us > now ?
+                              (uint32_t)((s_pending_move.at_us - now) / 1000) : 0;
 #if !CONFIG_DESK_SIMULATOR
     st.cal = s_cal;
 #endif
@@ -1003,8 +1084,14 @@ bool motion_is_automatic(void)
 {
     portENTER_CRITICAL(&s_lock);
     motion_state_t s = s_pub.state;
+    bool pending = s_pub.pending_active;
     portEXIT_CRITICAL(&s_lock);
-    return s == MOTION_SEEK || s == MOTION_SETTLE || s == MOTION_CALIBRATING;
+    return pending || s == MOTION_SEEK || s == MOTION_SETTLE || s == MOTION_CALIBRATING;
+}
+
+void motion_set_remote_countdown(uint32_t seconds)
+{
+    s_remote_countdown_s = seconds > 10 ? 10 : seconds;
 }
 
 #if CONFIG_DESK_DEBUG_COMMANDS
