@@ -5,6 +5,7 @@
 #include "ui.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -23,6 +24,8 @@
 #include "motion.h"
 #include "config.h"
 #include "net.h"
+#include "height.h"
+#include "vl53l0x.h"
 
 static const char *TAG = "ui";
 
@@ -30,6 +33,8 @@ static const char *TAG = "ui";
 #define JOG_REPEAT_MS       100
 #define UNLOCK_FRACTION     0.85f
 #define TOAST_MS            2500
+#define DEBUG_LOCKED_TIMEOUT_MS (5 * 60 * 1000)
+#define SENSOR_REFRESH_MS   250
 
 #define COL_BG       lv_color_hex(0x000000)
 #define COL_PANEL    lv_color_hex(0x1C1C1E)
@@ -77,6 +82,11 @@ static uint32_t s_frames;
 typedef struct {
     lv_obj_t *wifi, *net, *mqtt, *fault;
 } status_row_t;
+
+/* Sensor debug screen */
+static lv_obj_t *s_scr_dbg, *s_dbg_big, *s_dbg_vals_l, *s_dbg_vals_r;
+static bool s_debug_from_lock;
+static lv_obj_t *s_lock_sensor, *s_ctrl_sensor;
 
 static volatile bool s_locked = true;
 static net_status_t s_net;
@@ -142,8 +152,23 @@ static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, lv_color_t 
 
 /* Status row: Wi-Fi icon + address on the left, MQTT / fault on the right
  * (`right_inset` leaves room for the Lock button on the control screen). */
+static void show_debug(void);
+
+static void status_row_long_cb(lv_event_t *e)
+{
+    show_debug();
+}
+
 static void make_status_row(lv_obj_t *scr, status_row_t *row, int right_inset)
 {
+    /* Invisible hit area: a long press on the status row opens the sensor debug screen. */
+    lv_obj_t *hit = lv_obj_create(scr);
+    lv_obj_remove_style_all(hit);
+    lv_obj_set_size(hit, BOARD_LCD_H_RES - right_inset - (right_inset ? 8 : 0), 28);
+    lv_obj_set_pos(hit, 0, 0);
+    lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(hit, status_row_long_cb, LV_EVENT_LONG_PRESSED, NULL);
+
     row->wifi = make_label(scr, &lv_font_montserrat_14, COL_OFF, LV_SYMBOL_WIFI);
     lv_obj_align(row->wifi, LV_ALIGN_TOP_LEFT, 10, 6);
     row->net = make_label(scr, &lv_font_montserrat_14, COL_DIM, "");
@@ -375,6 +400,10 @@ static void build_lock(void)
     lv_obj_set_width(s_lock_info, 300);
     lv_obj_set_style_text_align(s_lock_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lock_info, LV_ALIGN_TOP_MID, 0, 92);
+    s_lock_sensor = make_label(s_scr_lock, &lv_font_montserrat_14, COL_DIM, "");
+    lv_obj_set_width(s_lock_sensor, 300);
+    lv_obj_set_style_text_align(s_lock_sensor, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lock_sensor, LV_ALIGN_TOP_MID, 0, 92);
 
     s_track = lv_obj_create(s_scr_lock);
     lv_obj_set_size(s_track, 288, 50);
@@ -434,6 +463,9 @@ static void build_control(void)
     s_ctrl_info = make_label(s_scr_ctrl, &lv_font_montserrat_14, COL_SEEK, "");
     lv_obj_set_width(s_ctrl_info, 152);
     lv_obj_align(s_ctrl_info, LV_ALIGN_TOP_LEFT, 10, 82);
+    s_ctrl_sensor = make_label(s_scr_ctrl, &lv_font_montserrat_14, COL_DIM, "");
+    lv_obj_set_width(s_ctrl_sensor, 152);
+    lv_obj_align(s_ctrl_sensor, LV_ALIGN_TOP_LEFT, 10, 82);
 
     s_btn_sit = make_preset(s_scr_ctrl, "SIT", MOTION_PRESET_SIT, &s_lbl_sit);
     lv_obj_align(s_btn_sit, LV_ALIGN_BOTTOM_LEFT, 8, -8);
@@ -452,6 +484,124 @@ static void build_control(void)
     lv_obj_t *ld = make_label(s_btn_down, &lv_font_montserrat_28, COL_TEXT, LV_SYMBOL_DOWN);
     lv_obj_center(ld);
     lv_obj_add_event_cb(s_btn_down, jog_event_cb, LV_EVENT_ALL, (void *)(intptr_t)MOTION_DIR_DOWN);
+}
+
+static void debug_back_cb(lv_event_t *e)
+{
+    if (s_debug_from_lock) {
+        show_lock();
+    } else {
+        lv_screen_load(s_scr_ctrl);
+        s_last_touch_ms = now_ms();
+    }
+}
+
+static void build_debug(void)
+{
+    s_scr_dbg = make_screen();
+    lv_obj_t *t = make_label(s_scr_dbg, &lv_font_montserrat_14, COL_DIM, "Height sensor (raw, uncalibrated)");
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 10, 6);
+
+    lv_obj_t *back = make_button(s_scr_dbg, 56, 26, COL_PANEL);
+    lv_obj_set_style_radius(back, 13, 0);
+    lv_obj_align(back, LV_ALIGN_TOP_RIGHT, -8, 2);
+    lv_obj_t *bl = make_label(back, &lv_font_montserrat_14, COL_DIM, "Back");
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(back, debug_back_cb, LV_EVENT_CLICKED, NULL);
+
+    s_dbg_big = make_label(s_scr_dbg, &lv_font_montserrat_28, COL_TEXT, "--");
+    lv_obj_align(s_dbg_big, LV_ALIGN_TOP_LEFT, 10, 32);
+
+    static const char *keys_l = "Raw\nStatus\nRate\nStd 2 s\nSpan 2 s";
+    static const char *keys_r = "Signal\nAmbient\nProfile\nAlpha\nErrors";
+    lv_obj_t *kl = make_label(s_scr_dbg, &lv_font_montserrat_14, COL_DIM, keys_l);
+    lv_obj_align(kl, LV_ALIGN_TOP_LEFT, 10, 72);
+    s_dbg_vals_l = make_label(s_scr_dbg, &lv_font_montserrat_14, COL_TEXT, "");
+    lv_obj_align(s_dbg_vals_l, LV_ALIGN_TOP_LEFT, 74, 72);
+    lv_obj_t *kr = make_label(s_scr_dbg, &lv_font_montserrat_14, COL_DIM, keys_r);
+    lv_obj_align(kr, LV_ALIGN_TOP_LEFT, 176, 72);
+    s_dbg_vals_r = make_label(s_scr_dbg, &lv_font_montserrat_14, COL_TEXT, "");
+    lv_obj_align(s_dbg_vals_r, LV_ALIGN_TOP_LEFT, 240, 72);
+}
+
+static void show_debug(void)
+{
+    lv_obj_t *cur = lv_screen_active();
+    if (cur == s_scr_dbg) {
+        return;
+    }
+    s_debug_from_lock = cur == s_scr_lock;
+    lv_screen_load(s_scr_dbg);
+    s_last_touch_ms = now_ms();
+    ESP_LOGI(TAG, "sensor debug screen");
+}
+
+static void fmt_opt(char *b, size_t n, float v, const char *unit)
+{
+    if (isnan(v)) {
+        snprintf(b, n, "--");
+    } else {
+        snprintf(b, n, "%.1f%s", v, unit);
+    }
+}
+
+static void render_sensor(void)
+{
+    height_status_t h;
+    height_get(&h);
+
+    /* One-line summary on the lock / control screens, where the motion info line is free. */
+    char line[48];
+    lv_color_t c = COL_DIM;
+    if (!h.online) {
+        snprintf(line, sizeof(line), "sensor offline");
+        c = COL_SEEK;
+    } else if (!h.valid) {
+        snprintf(line, sizeof(line), "sensor: no reading (%s)", vl53l0x_status_name(h.range_status));
+        c = COL_SEEK;
+    } else {
+        snprintf(line, sizeof(line), "sensor %.0f mm (uncalibrated)", h.filtered_mm);
+    }
+    lv_obj_t *pairs[2][2] = { { s_lock_sensor, s_lock_info }, { s_ctrl_sensor, s_ctrl_info } };
+    for (int i = 0; i < 2; i++) {
+        lv_label_set_text(pairs[i][0], line);
+        lv_obj_set_style_text_color(pairs[i][0], c, 0);
+        const char *info = lv_label_get_text(pairs[i][1]);
+        if (info && info[0]) {
+            lv_obj_add_flag(pairs[i][0], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(pairs[i][0], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (lv_screen_active() != s_scr_dbg) {
+        return;
+    }
+    char big[32], l[128], r[128], sr[12], sf[12], sp[12];
+    if (!h.online) {
+        snprintf(big, sizeof(big), "sensor offline");
+        lv_obj_set_style_text_color(s_dbg_big, COL_SEEK, 0);
+    } else if (!h.valid) {
+        snprintf(big, sizeof(big), "-- mm");
+        lv_obj_set_style_text_color(s_dbg_big, COL_SEEK, 0);
+    } else {
+        snprintf(big, sizeof(big), "%.1f mm", h.filtered_mm);
+        lv_obj_set_style_text_color(s_dbg_big, COL_TEXT, 0);
+    }
+    lv_label_set_text(s_dbg_big, big);
+    fmt_opt(sr, sizeof(sr), h.std_raw_mm, "");
+    fmt_opt(sf, sizeof(sf), h.std_filt_mm, "");
+    fmt_opt(sp, sizeof(sp), h.span_filt_mm, " mm");
+    if (h.online) {
+        snprintf(l, sizeof(l), "%u mm\n%u %s\n%.1f Hz\n%s / %s\n%s", h.raw_mm, h.range_status,
+                 vl53l0x_status_name(h.range_status), h.rate_hz, sr, sf, sp);
+    } else {
+        snprintf(l, sizeof(l), "--\n--\n--\n--\nretry %.1f s", h.retry_in_ms / 1000.0f);
+    }
+    snprintf(r, sizeof(r), "%.2f MCPS\n%.2f MCPS\n%u ms\n%.2f\n%lu (%lu init)", h.signal_mcps, h.ambient_mcps,
+             h.budget_ms, h.ema_pct / 100.0f, (unsigned long)h.errors, (unsigned long)h.inits);
+    lv_label_set_text(s_dbg_vals_l, l);
+    lv_label_set_text(s_dbg_vals_r, r);
 }
 
 static lv_obj_t *make_overlay(lv_color_t accent)
@@ -635,9 +785,18 @@ static void status_timer_cb(lv_timer_t *t)
     }
 
     int64_t now = now_ms();
+    static int64_t last_sensor_ms;
+    if (now - last_sensor_ms >= SENSOR_REFRESH_MS) {
+        render_sensor();
+        last_sensor_ms = now;
+    }
     bool moving = st.state == MOTION_JOG || st.state == MOTION_SEEK || st.state == MOTION_SETTLE ||
                   st.state == MOTION_CALIBRATING;
     if (lv_screen_active() == s_scr_ctrl && !moving && now - s_last_touch_ms > s_cfg.autolock_ms) {
+        show_lock();
+    }
+    if (lv_screen_active() == s_scr_dbg && !moving &&
+        now - s_last_touch_ms > (s_debug_from_lock ? DEBUG_LOCKED_TIMEOUT_MS : s_cfg.autolock_ms)) {
         show_lock();
     }
     if (lv_screen_active() == s_scr_lock && !s_dimmed && !moving) {
@@ -740,6 +899,7 @@ esp_err_t ui_init(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel, es
 
     build_lock();
     build_control();
+    build_debug();
     build_overlays();
     lv_screen_load(s_scr_lock);
     s_locked_at_ms = s_last_touch_ms = now_ms();

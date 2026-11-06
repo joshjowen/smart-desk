@@ -10,6 +10,7 @@
 #include "web.h"
 #include "board.h"
 #include "motion.h"
+#include "height.h"
 #include "opto.h"
 #include "ui.h"
 #include "console.h"
@@ -46,6 +47,7 @@ static void on_config_changed(const desk_config_t *c)
     apply_presets(c);
     ui_apply_config(c);
     net_apply_config(c);
+    height_set_params(c->sensor_profile, c->sensor_ema_pct);
 }
 
 static void mark_valid_cb(void *arg)
@@ -88,6 +90,11 @@ void app_main(void)
 
     ESP_ERROR_CHECK(board_i2c_init());
     board_i2c_scan();
+    /* Height sensor (stage 3: shown only, not used for control). A missing
+     * sensor is retried in the background and never blocks boot. */
+    if (height_init(cfg.sensor_profile, cfg.sensor_ema_pct) != ESP_OK) {
+        ESP_LOGE(TAG, "height service failed to start");
+    }
 
     ESP_ERROR_CHECK(board_backlight_init());
     board_backlight_set(0);

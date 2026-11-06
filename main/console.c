@@ -11,6 +11,8 @@
 #include "esp_sntp.h"
 #include "board.h"
 #include "motion.h"
+#include "height.h"
+#include "vl53l0x.h"
 
 static const char *TAG = "console";
 
@@ -56,6 +58,26 @@ static int cmd_time(int argc, char **argv)
                ip ? ipaddr_ntoa(ip) : "-", esp_sntp_getreachability(i));
     }
     printf("sntp enabled=%d sync status=%d\n", esp_sntp_enabled(), sntp_get_sync_status());
+    return 0;
+}
+
+static int cmd_sensor(int argc, char **argv)
+{
+    height_status_t h;
+    height_get(&h);
+    if (!h.online) {
+        printf("sensor offline (next try in %lu ms), errors=%lu inits=%lu\n", (unsigned long)h.retry_in_ms,
+               (unsigned long)h.errors, (unsigned long)h.inits);
+        return 0;
+    }
+    printf("raw=%u mm status=%u (%s) filtered=%s%.1f mm signal=%.2f ambient=%.2f MCPS\n", h.raw_mm,
+           h.range_status, vl53l0x_status_name(h.range_status), h.valid ? "" : "(invalid) ", h.filtered_mm,
+           h.signal_mcps, h.ambient_mcps);
+    printf("rate=%.1f Hz std2s raw=%.2f filt=%.2f span=%.1f mm | profile=%s (%u ms) alpha=%.2f samples=%lu errors=%lu "
+           "inits=%lu touch_errors=%lu\n",
+           h.rate_hz, h.std_raw_mm, h.std_filt_mm, h.span_filt_mm, h.profile ? "accurate" : "default", h.budget_ms,
+           h.ema_pct / 100.0, (unsigned long)h.samples, (unsigned long)h.errors, (unsigned long)h.inits,
+           (unsigned long)board_touch_errors());
     return 0;
 }
 
@@ -107,6 +129,7 @@ void console_start(void)
         { .command = "status", .help = "Show motion status", .func = cmd_status },
         { .command = "stop", .help = "Stop any movement", .func = cmd_stop },
         { .command = "goto", .help = "Seek to height: goto <mm>", .func = cmd_goto },
+        { .command = "sensor", .help = "Show height sensor readings", .func = cmd_sensor },
         { .command = "scan", .help = "Scan the I2C bus", .func = cmd_scan },
         { .command = "time", .help = "Show clock and NTP server status", .func = cmd_time },
 #if CONFIG_DESK_DEBUG_COMMANDS

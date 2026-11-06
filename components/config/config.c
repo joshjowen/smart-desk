@@ -49,6 +49,8 @@ static void defaults(desk_config_t *c)
     c->dim_s = CONFIG_DESK_UI_DIM_S;
     c->backlight = CONFIG_DESK_UI_BACKLIGHT;
     c->allow_remote_moves = false;
+    c->sensor_profile = 0;
+    c->sensor_ema_pct = CONFIG_DESK_HEIGHT_EMA_PCT;
 }
 
 static esp_err_t save(const desk_config_t *c)
@@ -169,6 +171,9 @@ static bool validate(const desk_config_t *c, char *err, size_t err_len)
     for (const char *p = c->ntp_server; *p; p++) {
         if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '-')) FAIL("Time server: a hostname or IP address");
     }
+    if (c->sensor_profile > 1) FAIL("Sensor profile: default or high accuracy");
+    if (c->sensor_ema_pct < CFG_EMA_MIN || c->sensor_ema_pct > CFG_EMA_MAX)
+        FAIL("Filter alpha: %.2f-%.2f", CFG_EMA_MIN / 100.0, CFG_EMA_MAX / 100.0);
     if (c->mqtt_device_id[0] && !valid_hostname(c->mqtt_device_id))
         FAIL("MQTT device ID: lowercase letters, digits and '-'");
     return true;

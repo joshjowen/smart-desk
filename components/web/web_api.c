@@ -7,9 +7,13 @@
  *   GET  /api/wifi/scan
  *   POST /api/password               {password} sets/clears, {dismiss:true} hides the prompt
  *   POST /api/reboot  /api/factory-reset  /api/ota (raw .bin body)
- * Everything except status and login needs the admin token once a password is set.
+ *   GET  /api/sensor?since=<seq>     sensor stats + samples since seq (open)
+ *   GET  /api/sensor.csv             last 60 s of samples (open)
+ * Everything except status, sensor and login needs the admin token once a password is set.
  */
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "esp_app_desc.h"
@@ -25,6 +29,9 @@
 #include "motion.h"
 #include "net.h"
 #include "ui.h"
+#include "board.h"
+#include "height.h"
+#include "vl53l0x.h"
 #include "web_priv.h"
 
 static const char *TAG = "web_api";
@@ -185,6 +192,17 @@ cJSON *web_status_json(void)
     cJSON_AddStringToObject(o, "last_error", st.last_error);
     cJSON_AddNumberToObject(o, "last_error_seq", st.last_error_seq);
     cJSON_AddStringToObject(o, "units", c.units_cm ? "cm" : "mm");
+    height_status_t h;
+    height_get(&h);
+    cJSON *sn = cJSON_AddObjectToObject(o, "sensor");
+    cJSON_AddBoolToObject(sn, "online", h.online);
+    cJSON_AddBoolToObject(sn, "valid", h.valid);
+    /* Whole mm so live pushes don't fire on sub-mm noise. */
+    if (h.valid) {
+        cJSON_AddNumberToObject(sn, "mm", lroundf(h.filtered_mm));
+    } else {
+        cJSON_AddNullToObject(sn, "mm");
+    }
     cJSON *ps = cJSON_AddArrayToObject(o, "presets");
     for (int i = 0; i < MOTION_PRESET_COUNT; i++) {
         if (!c.presets[i].enabled) {
@@ -290,6 +308,9 @@ static cJSON *config_json(const desk_config_t *c)
     cJSON_AddBoolToObject(m, "password_set", c->mqtt_pass[0] != 0);
     cJSON_AddStringToObject(m, "device_id", c->mqtt_device_id);
     cJSON_AddBoolToObject(o, "allow_remote_moves", c->allow_remote_moves);
+    cJSON *sn = cJSON_AddObjectToObject(o, "sensor");
+    cJSON_AddStringToObject(sn, "profile", c->sensor_profile ? "accurate" : "default");
+    cJSON_AddNumberToObject(sn, "ema_alpha", c->sensor_ema_pct / 100.0);
     cJSON_AddBoolToObject(o, "admin_password_set", c->admin_set);
     cJSON_AddBoolToObject(o, "admin_prompt", !c->admin_set && !c->admin_prompt_dismissed);
     int32_t lo, hi;
@@ -392,6 +413,25 @@ static bool merge_config(const cJSON *o, desk_config_t *c, char *err, size_t el)
         if (!take_str(m, "password", c->mqtt_pass, sizeof(c->mqtt_pass), "MQTT password", err, el)) return false;
         if (!take_str(m, "device_id", c->mqtt_device_id, sizeof(c->mqtt_device_id), "MQTT device ID", err, el)) return false;
     }
+    const cJSON *sn = cJSON_GetObjectItem(o, "sensor");
+    if (sn) {
+        const cJSON *pr = cJSON_GetObjectItem(sn, "profile");
+        if (pr) {
+            if (!cJSON_IsString(pr) || (strcmp(pr->valuestring, "default") && strcmp(pr->valuestring, "accurate"))) {
+                snprintf(err, el, "Sensor profile: default or accurate");
+                return false;
+            }
+            c->sensor_profile = strcmp(pr->valuestring, "accurate") == 0;
+        }
+        const cJSON *a = cJSON_GetObjectItem(sn, "ema_alpha");
+        if (a) {
+            if (!cJSON_IsNumber(a) || a->valuedouble < CFG_EMA_MIN / 100.0 - 1e-9 || a->valuedouble > CFG_EMA_MAX / 100.0 + 1e-9) {
+                snprintf(err, el, "Filter alpha: %.2f-%.2f", CFG_EMA_MIN / 100.0, CFG_EMA_MAX / 100.0);
+                return false;
+            }
+            c->sensor_ema_pct = (uint8_t)lround(a->valuedouble * 100);
+        }
+    }
     return take_bool(o, "allow_remote_moves", &c->allow_remote_moves, "Allow remote moves", err, el);
 }
 
@@ -412,6 +452,126 @@ static esp_err_t config_put(httpd_req_t *req)
     }
     config_get(&c);
     return web_send_json(req, 200, config_json(&c));
+}
+
+/* ---------------- sensor diagnostics ---------------- */
+
+#define SAMPLE_CHUNK 48
+
+static void fmt_num(char *b, size_t n, float v, int decimals)
+{
+    if (isnan(v) || isinf(v)) {
+        snprintf(b, n, "null");
+    } else {
+        snprintf(b, n, "%.*f", decimals, v);
+    }
+}
+
+/* Samples are streamed in chunks: a cJSON tree of 1200 samples would need
+ * hundreds of KB. */
+static esp_err_t sensor_get(httpd_req_t *req)
+{
+    uint32_t since = 0;
+    char q[48], v[16];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) {
+        since = strtoul(v, NULL, 10);
+    }
+    height_status_t h;
+    height_get(&h);
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    char filt[16], sr[16], sf[16], sp[16], buf[640];
+    fmt_num(filt, sizeof(filt), h.valid ? h.filtered_mm : NAN, 1);
+    fmt_num(sr, sizeof(sr), h.std_raw_mm, 2);
+    fmt_num(sf, sizeof(sf), h.std_filt_mm, 2);
+    fmt_num(sp, sizeof(sp), h.span_filt_mm, 1);
+    int n = snprintf(buf, sizeof(buf),
+        "{\"online\":%s,\"valid\":%s,\"raw_mm\":%u,\"raw_ok\":%s,\"status\":%u,\"status_text\":\"%s\","
+        "\"filtered_mm\":%s,\"signal_mcps\":%.2f,\"ambient_mcps\":%.2f,\"rate_hz\":%.1f,"
+        "\"std_raw_mm\":%s,\"std_filt_mm\":%s,\"span_filt_mm\":%s,\"samples_total\":%lu,\"errors\":%lu,"
+        "\"inits\":%lu,\"retry_in_ms\":%lu,\"profile\":\"%s\",\"budget_ms\":%u,\"ema_alpha\":%.2f,"
+        "\"touch_errors\":%lu,\"now_ms\":%lu,\"samples\":[",
+        h.online ? "true" : "false", h.valid ? "true" : "false", h.raw_mm, h.raw_ok ? "true" : "false",
+        h.range_status, vl53l0x_status_name(h.range_status), filt, h.signal_mcps, h.ambient_mcps, h.rate_hz,
+        sr, sf, sp, (unsigned long)h.samples, (unsigned long)h.errors, (unsigned long)h.inits,
+        (unsigned long)h.retry_in_ms, h.profile ? "accurate" : "default", h.budget_ms, h.ema_pct / 100.0f,
+        (unsigned long)board_touch_errors(), (unsigned long)now);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    height_sample_t *chunk = malloc(SAMPLE_CHUNK * sizeof(height_sample_t));
+    if (!chunk) {
+        httpd_resp_send_chunk(req, "]}", 2);
+        return httpd_resp_send_chunk(req, NULL, 0);
+    }
+    uint32_t seq = since;
+    bool first = true;
+    size_t got;
+    while ((got = height_history(&seq, chunk, SAMPLE_CHUNK)) > 0) {
+        n = 0;
+        for (size_t i = 0; i < got; i++) {
+            const height_sample_t *s = &chunk[i];
+            if (now - s->t_ms > HEIGHT_HISTORY_S * 1000) {
+                continue;
+            }
+            char f[12];
+            if (s->filt_dmm == HEIGHT_FILT_NONE) snprintf(f, sizeof(f), "null");
+            else snprintf(f, sizeof(f), "%.1f", s->filt_dmm / 10.0f);
+            n += snprintf(buf + n, sizeof(buf) - n, "%s[%lu,%u,%s,%u]", first ? "" : ",", (unsigned long)s->t_ms,
+                          s->raw_mm, f, s->status);
+            first = false;
+            if (n > (int)sizeof(buf) - 48) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) { free(chunk); return ESP_FAIL; }
+                n = 0;
+            }
+        }
+        if (n && httpd_resp_send_chunk(req, buf, n) != ESP_OK) { free(chunk); return ESP_FAIL; }
+    }
+    free(chunk);
+    n = snprintf(buf, sizeof(buf), "],\"next\":%lu}", (unsigned long)seq);
+    httpd_resp_send_chunk(req, buf, n);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t sensor_csv_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"desk-sensor.csv\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    static const char head[] = "t_ms,raw_mm,filtered_mm,range_status,range_ok,signal_mcps,ambient_mcps\n";
+    if (httpd_resp_send_chunk(req, head, sizeof(head) - 1) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    height_sample_t *chunk = malloc(SAMPLE_CHUNK * sizeof(height_sample_t));
+    if (!chunk) {
+        return httpd_resp_send_chunk(req, NULL, 0);
+    }
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000), seq = 0;
+    char buf[640];
+    size_t got;
+    while ((got = height_history(&seq, chunk, SAMPLE_CHUNK)) > 0) {
+        int n = 0;
+        for (size_t i = 0; i < got; i++) {
+            const height_sample_t *s = &chunk[i];
+            if (now - s->t_ms > HEIGHT_HISTORY_S * 1000) {
+                continue;
+            }
+            char f[12] = "";
+            if (s->filt_dmm != HEIGHT_FILT_NONE) snprintf(f, sizeof(f), "%.1f", s->filt_dmm / 10.0f);
+            n += snprintf(buf + n, sizeof(buf) - n, "%lu,%u,%s,%u,%d,%.2f,%.2f\n", (unsigned long)s->t_ms, s->raw_mm,
+                          f, s->status, height_status_ok(s->status, s->raw_mm), s->signal_x128 / 128.0f,
+                          s->ambient_x128 / 128.0f);
+            if (n > (int)sizeof(buf) - 64) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) { free(chunk); return ESP_FAIL; }
+                n = 0;
+            }
+        }
+        if (n && httpd_resp_send_chunk(req, buf, n) != ESP_OK) { free(chunk); return ESP_FAIL; }
+    }
+    free(chunk);
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /* ---------------- system ---------------- */
@@ -614,6 +774,8 @@ esp_err_t web_api_register(httpd_handle_t h)
 {
     const httpd_uri_t uris[] = {
         { .uri = "/api/status", .method = HTTP_GET, .handler = status_get },
+        { .uri = "/api/sensor", .method = HTTP_GET, .handler = sensor_get },
+        { .uri = "/api/sensor.csv", .method = HTTP_GET, .handler = sensor_csv_get },
         { .uri = "/api/login", .method = HTTP_POST, .handler = login_post },
         { .uri = "/api/password", .method = HTTP_POST, .handler = password_post },
         { .uri = "/api/config", .method = HTTP_GET, .handler = config_get_h },

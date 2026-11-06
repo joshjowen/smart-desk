@@ -4,7 +4,7 @@ idf_component_register(SRCS "web.c" "web_api.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "."
                        REQUIRES esp_http_server
-                       PRIV_REQUIRES config motion net ui json app_update esp_app_format esp_timer esp_system bootloader_support)
+                       PRIV_REQUIRES config motion net ui height vl53l0x board json app_update esp_app_format esp_timer esp_system bootloader_support)
 
 # Gzip the single-page web app at build time and embed it.
 set(WEB_SRC ${project_dir}/web/index.html)

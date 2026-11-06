@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define CONFIG_VERSION      2
+#define CONFIG_VERSION      3
 #define CFG_PRESET_COUNT    4   /* sit, stand, custom1, custom2 (same order as motion_preset_t) */
 
 typedef struct {
@@ -55,6 +55,10 @@ typedef struct {
 
     /* --- v2 --- (new fields go at the end so older blobs load as a prefix) */
     char ntp_server[64];       /* empty = automatic (DHCP-provided, then the gateway) */
+
+    /* --- v3 --- height sensor */
+    uint8_t sensor_profile;    /* height_profile_t: 0 default (50 ms), 1 high accuracy (200 ms) */
+    uint8_t sensor_ema_pct;    /* filter EMA alpha in percent */
 } desk_config_t;
 
 typedef void (*config_listener_t)(const desk_config_t *cfg);
@@ -83,6 +87,8 @@ esp_err_t config_factory_reset(void);
 #define CFG_DIM_MAX      3600
 #define CFG_BL_MIN       5
 #define CFG_BL_MAX       100
+#define CFG_EMA_MIN      5
+#define CFG_EMA_MAX      100
 
 /* Presets must lie in this range (set from motion at boot). */
 void config_set_height_range(int32_t min_mm, int32_t max_mm);

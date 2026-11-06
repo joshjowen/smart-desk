@@ -4,8 +4,9 @@ ESP-IDF firmware for a Waveshare ESP32-C6-Touch-LCD-1.47 that drives an Otto Cha
 simulating handset button presses through PC817 optocouplers. The full plan is in
 [desk-controller-spec.md](desk-controller-spec.md); progress is in [CHANGELOG.md](CHANGELOG.md).
 
-**Current stage: 2 (real desk, hold-to-run only, no height sensor).** The optos are driven in source
-mode (GPIO high = button pressed). Presets are disabled until the height sensor is calibrated.
+**Current stage: 3 (real desk, hold-to-run only; height sensor readings shown but not used yet).** The
+optos are driven in source mode (GPIO high = button pressed). The VL53L0X readings are raw distances;
+presets stay disabled until the sensor is calibrated (stage 4).
 
 ## Build and flash
 
@@ -51,6 +52,11 @@ Factory reset (System tab) erases all settings.
 - **Settings**: Wi-Fi, hostname, time server, presets, display units and timeouts, backlight, MQTT
   (used from stage 6), and **Allow remote moves**. With it off (the default), the web page can only move
   the desk while the desk's screen is unlocked. STOP always works.
+- **Sensor**: VL53L0X diagnostics: filtered and raw distance, range status, signal and ambient rate,
+  samples per second, standard deviation over 2 s, a plot of the last 30 s (raw dots, filtered line,
+  bad samples in red), a stillness summary over the last 10 s, CSV download of the last 60 s, and the
+  ranging profile (default 50 ms / high accuracy 200 ms) and filter alpha. `GET /api/sensor?since=<n>`
+  and `GET /api/sensor.csv` give the same data to scripts.
 - **System**: firmware and network info, last fault, duty budget, reboot, factory reset, firmware
   update (upload `build/smart_desk.bin`; a firmware that fails to start rolls back automatically).
 
@@ -65,6 +71,11 @@ the router/gateway), then pool.ntp.org. It is only used for log timestamps.
   seek. While seeking, a touch anywhere stops it. "Lock" returns to the lock screen.
 - Auto-locks after 30 s without a touch; dims after 60 s locked. The first touch on a dim screen only
   wakes it.
+- The line under the height shows the sensor's filtered distance ("sensor 80 mm (uncalibrated)"), or
+  "sensor offline".
+- **Long-press the status row** (top of the screen) for the sensor debug screen: filtered and raw mm,
+  range status, rate, standard deviation and span over 2 s, signal / ambient rate, profile, alpha and
+  error counts. Back returns; it also times out (auto-lock time if opened unlocked, 5 min if locked).
 - **Cooldown** (duty budget used) shows a countdown; **Fault** shows the reason and needs Acknowledge.
 
 ### Serial console
@@ -76,6 +87,7 @@ The board's USB port gives a `desk>` prompt (e.g. through `idf.py monitor`):
 | `status` | State, height, target, duty budget, fault, last error, heap |
 | `stop` | Stop any movement |
 | `goto <mm>` | Seek to a height |
+| `sensor` | Height sensor readings, noise, profile and error counts |
 | `scan` | I2C bus scan |
 | `time` | Clock and NTP server status |
 | `fault [text]` | Debug: raise a fault (test the fault screen) |
@@ -107,6 +119,37 @@ held off). `DESK_HANDSET_SENSE` (off) reads the handset lines to detect physical
 The 10 kΩ pull-downs on GPIO3/GPIO7 are not fitted yet. The firmware enables the internal pull-downs
 once it is running, but nothing holds the pins low while the chip is in reset.
 
+## Height sensor (stage 3)
+
+The VL53L0X shares the onboard I2C bus with the touch controller, behind a bus mutex. The `height`
+task polls it every 10 ms in continuous mode, drops samples with a bad range status, takes the median
+of the last 5 good samples and smooths that with an EMA (alpha 0.3 by default). The filtered reading
+goes invalid after 500 ms without a good sample. If the sensor stops answering it is marked offline
+straight away and re-initialised with back-off (0.5 s up to 5 s), so it can be unplugged and plugged
+back in without a reboot. A touch read that fails on the shared bus counts as "not touched" instead of
+crashing the UI.
+
+Kconfig (`Desk height sensor`): `DESK_HEIGHT_BUDGET_MS` (50), `DESK_HEIGHT_BUDGET_ACCURATE_MS` (200),
+`DESK_HEIGHT_EMA_PCT` (30). The profile and alpha can also be changed live from the Sensor tab (saved in
+settings).
+
+If the screen goes black and the board keeps rebooting with `probe device timeout` in the log, the
+sensor is holding the bus low: check its VIN/GND (an unpowered breakout pulls SDA/SCL down) and that
+SDA/SCL go to GPIO18/19. The boot scan now reports "bus not responding" in that case.
+
+**Stillness noise** (desk still for 10 s, default profile, measured 2026-11-06 with the sensor mounted):
+
+| Position | Filtered mean | Filtered std dev | Filtered min/max | Raw std dev | Raw min/max | Signal |
+| --- | --- | --- | --- | --- | --- | --- |
+| Bottom | 50.2 mm | 0.44 mm | 49.1 / 51.0 | 1.08 mm | 46 / 54 | 27.3 MCPS |
+| Middle | 292.9 mm | 0.76 mm | 291.2 / 294.4 | 1.72 mm | 287 / 297 | 9.2 MCPS |
+| Top | 529.7 mm | 1.10 mm | 527.4 / 533.3 | 3.40 mm | 517 / 539 | 2.8 MCPS |
+
+All within ±5 mm filtered (worst ±3 mm at the top, where the return signal is weakest). No bad
+samples in any window. The reading rises as the desk goes up: about 480 mm of travel at ~15.5 mm/s
+in both directions, so a full end-to-end run takes ~31 s, longer than the 25 s uncalibrated max move
+time (stage 4 must allow for that).
+
 ## Wiring
 
 Pin numbers come from [main/board_config.h](main/board_config.h).
@@ -122,13 +165,13 @@ Pin numbers come from [main/board_config.h](main/board_config.h).
 | ESP32 GPIO3 (UP) | PC817 module I1 | Source mode; 10 kΩ pull-down on the GPIO (recommended, not yet fitted) |
 | ESP32 GPIO7 (DOWN) | PC817 module I2 | 10 kΩ pull-down on the GPIO (recommended, not yet fitted) |
 | ESP32 GND | PC817 module input G | |
-| ESP32 3V3 / GND | VL53L0X VIN / GND | Stage 3 |
-| ESP32 GPIO18 / GPIO19 | VL53L0X SDA / SCL | Shared onboard I2C bus (stage 3) |
+| ESP32 3V3 / GND | VL53L0X VIN / GND | |
+| ESP32 GPIO18 / GPIO19 | VL53L0X SDA / SCL | Shared onboard I2C bus; leave XSHUT / GPIO1 unconnected |
 
 In sink mode the module's input + goes to 5 V and input − to the GPIO, with a pull-up instead of the
 pull-down. GPIO3 is also the TF-card MISO line; the TF card is never used and its CS (GPIO4) is held high.
 
-Onboard I2C devices found at boot: 0x63 (AXS5106L touch), 0x6b (QMI8658 IMU, unused).
+I2C devices found at boot: 0x29 (VL53L0X), 0x63 (AXS5106L touch), 0x6b (QMI8658 IMU, unused).
 
 ## Layout
 
@@ -139,6 +182,8 @@ components/
   jd9853/        LCD panel driver
   axs5106/       touch driver
   motion/        motion state machine, safety invariants, duty ledger (simulator in stage 0)
+  vl53l0x/       VL53L0X driver (C port of Pololu's library)
+  height/        sensor task, filter, 60 s history
   ui/            LVGL screens
   config/        settings in NVS
   net/           Wi-Fi, setup AP + captive DNS, mDNS, SNTP

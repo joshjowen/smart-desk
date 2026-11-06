@@ -1,0 +1,20 @@
+menu "Desk height sensor"
+
+    config DESK_HEIGHT_BUDGET_MS
+        int "VL53L0X timing budget, default profile (ms)"
+        range 20 500
+        default 50
+        help
+            About one sample per budget (50 ms = ~20 Hz).
+
+    config DESK_HEIGHT_BUDGET_ACCURATE_MS
+        int "VL53L0X timing budget, high-accuracy profile (ms)"
+        range 20 500
+        default 200
+
+    config DESK_HEIGHT_EMA_PCT
+        int "Default filter EMA alpha (percent)"
+        range 5 100
+        default 30
+
+endmenu

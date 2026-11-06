@@ -27,11 +27,17 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 - **Stage 1 (Wi-Fi, settings, web UI): done; all acceptance checks passed on hardware.**
 - **Stage 2 (real optos, hold-to-run): done and tested on the desk.** Source mode, active-high.
   The external 10 kΩ pull-downs are NOT fitted (Josh accepted the risk; no movement seen on
-  reset/crash/flash). Waiting for Josh to say go before stage 3 (VL53L0X, not yet connected).
-- Open question raised with Josh: the setup AP is open (no password). Offered to add one.
-- Stages 3–6 not started. The desk is wired to the optos; the VL53L0X is not connected yet.
-- Firmware now really moves the desk: never command movement from Claude Code unless Josh is at the
-  desk and has said so.
+  reset/crash/flash).
+- **Stage 3 (VL53L0X raw readings): done and accepted on the desk.** Tracking and stillness pass
+  (README table). Hot-unplug test deferred by Josh until the wiring is permanent: run it after the
+  final stage. Waiting for Josh to say go before stage 4 (calibration).
+- Stages 4–6 not started.
+- Firmware really moves the desk. Josh has said it is safe for Claude to drive it (2026-11-06): the
+  control box stops by itself at both end stops. Jog over the WebSocket (`jog` + `hb` every 100 ms,
+  then `stop`). Keep the heartbeat in its own task: a blocking HTTP/mDNS call in the same loop starves
+  it and the 300 ms timeout stops the desk (looks like a false end stop). Mind the duty budget.
+- Desk geometry (sensor reading, not desk height): bottom ~50 mm, top ~530 mm, ~15.5 mm/s each way,
+  so a full run is ~31 s, more than the 25 s uncalibrated max move time.
 
 ## Build, flash, monitor
 
@@ -70,6 +76,8 @@ main/                 app_main (init order), board_config.h (ALL pin numbers), c
 components/board      buses, JD9853 display, AXS5106L touch, backlight, TF CS
 components/jd9853     esp_lcd panel driver (init sequence from Waveshare demo)
 components/axs5106    esp_lcd_touch driver
+components/vl53l0x    VL53L0X driver (Pololu port), non-blocking sample reads
+components/height     sensor task: filter (median 5 + EMA), 60 s history, offline/back-off re-init
 components/motion     motion state machine + safety invariants + duty ledger (duty.c); simulator in stages 0-1
 components/config     typed settings blob in NVS (versioned), admin password (PBKDF2), listeners
 components/net        Wi-Fi STA + setup AP fallback, captive DNS (dns_captive.c), mDNS, SNTP
@@ -107,7 +115,11 @@ tools/serlog.py       serial capture helper
 - AXS5106L reads use separate write then read (STOP between), as in Waveshare's demo.
 - Display is landscape 320x172: swap_xy + mirror_x on the panel (via lvgl_port rotation), gap (0, 34).
   Touch: swap_xy only, with x_max/y_max given in native portrait (172/320).
-- Onboard I2C devices: 0x63 (touch), 0x6b (QMI8658 IMU, unused). 0x29 (VL53L0X) is free. One boot showed
+- **A failed touch read used to abort the whole firmware** (esp_lvgl_port ESP_ERROR_CHECKs it). Board
+  wraps the touch `read_data` to take the I2C mutex and report errors as "no touch". A sensor with
+  bad power/wiring held SDA/SCL low and boot-looped the board this way.
+- Shared I2C bus: `board_i2c_lock()` (recursive mutex) around every touch and sensor transaction.
+- Onboard I2C devices: 0x63 (touch), 0x6b (QMI8658 IMU, unused). 0x29 is the VL53L0X. One boot showed
   intermittent `i2c.master: probe device timeout` errors during the boot scan; not reproduced since.
 - ESP-IDF 5.5 httpd does NOT call the WebSocket URI handler for the handshake; use
   `ws_post_handshake_cb` (`CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT`).

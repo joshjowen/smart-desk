@@ -56,11 +56,16 @@ progress{width:100%}
 .netlist button:last-child{border-bottom:0}
 .netlist button.sel{background:var(--btn)}
 .netlist small{color:var(--dim);white-space:nowrap;margin-left:12px}
+.sens{font-size:44px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums}
+.sens small{font-size:18px;color:var(--dim);font-weight:500;margin-left:4px}
+#plot{width:100%;height:200px;display:block}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--dim);margin-top:6px}
+.legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:6px}
 </style>
 </head>
 <body>
 <header><h1 id="title">Desk</h1><span id="conn">connecting…</span></header>
-<nav><button data-tab="control" class="on">Control</button><button data-tab="settings">Settings</button><button data-tab="system">System</button></nav>
+<nav><button data-tab="control" class="on">Control</button><button data-tab="sensor">Sensor</button><button data-tab="settings">Settings</button><button data-tab="system">System</button></nav>
 <main>
 
 <section id="control" class="on">
@@ -77,6 +82,28 @@ progress{width:100%}
     <div class="presets" id="presetBtns"></div>
     <p class="hint" id="presetHint" hidden>Presets need the height sensor and calibration (coming in a later stage).</p>
     <button class="stop" id="stop">STOP</button>
+  </div>
+</section>
+
+<section id="sensor">
+  <div id="sensOff" class="banner warn" hidden></div>
+  <div class="card"><h2>Distance (raw, not yet calibrated to desk height)</h2>
+    <div class="sens"><span id="sFilt">--</span><small>mm filtered</small></div>
+    <div class="sub" id="sRaw">&nbsp;</div>
+  </div>
+  <div class="card"><h2>Last 30 s</h2>
+    <canvas id="plot"></canvas>
+    <div class="legend"><span><i style="background:var(--dim)"></i>raw</span><span><i style="background:var(--accent)"></i>filtered</span><span><i style="background:var(--bad)"></i>bad sample</span></div>
+    <div class="actions"><a href="/api/sensor.csv" download="desk-sensor.csv"><button type="button">Download CSV (60 s)</button></a></div>
+  </div>
+  <div class="card"><h2>Stillness (last 10 s, keep the desk still)</h2><dl id="still"></dl>
+    <p class="hint">Record these at the bottom, middle and top of travel. Filtered should stay within about ±5 mm.</p></div>
+  <div class="card"><h2>Live</h2><dl id="sStats"></dl></div>
+  <div class="card"><h2>Sensor settings</h2>
+    <label for="sProfile">Ranging profile</label>
+    <select id="sProfile"><option value="default">Default (50 ms, ~20 Hz)</option><option value="accurate">High accuracy (200 ms, ~5 Hz)</option></select>
+    <label for="sAlpha">Filter EMA alpha (0.05–1, lower = smoother but slower)</label><input id="sAlpha" type="number" min="0.05" max="1" step="0.05">
+    <div class="actions"><button class="primary" id="sSave">Apply</button></div>
   </div>
 </section>
 
@@ -192,6 +219,7 @@ async function showTab(name) {
     if (name === 'settings') await loadConfig();
     if (name === 'system') await loadSystem();
   } catch (e) { toast(e.message); }
+  if (name === 'sensor') startSensor(); else stopSensor();
 }
 
 /* ---- live channel ---- */
@@ -215,7 +243,10 @@ function render(s) {
   sub.className = 'sub';
   if (s.state === 'seek' || s.state === 'settle') { sub.textContent = '→ ' + fmt(s.target_mm, s.units) + ' ' + s.units; sub.classList.add('seek'); }
   else if (s.state === 'jog') sub.textContent = s.output === 'up' ? 'moving up' : s.output === 'down' ? 'moving down' : '';
-  else sub.textContent = s.state === 'idle' ? '' : s.state;
+  else if (s.state !== 'idle') sub.textContent = s.state;
+  else if (!s.sensor) sub.textContent = '';
+  else if (!s.sensor.online) { sub.textContent = 'sensor offline'; sub.classList.add('seek'); }
+  else sub.textContent = s.sensor.valid ? 'sensor ' + s.sensor.mm + ' mm (uncalibrated)' : 'sensor: no reading';
   $('up').classList.toggle('active', s.output === 'up');
   $('down').classList.toggle('active', s.output === 'down');
 
@@ -343,6 +374,82 @@ async function setPassword(pw) {
 $('pwChange').onclick = $('pwPromptSet').onclick = async () => { const pw = await askPassword(); if (pw) setPassword(pw); };
 $('pwRemove').onclick = () => { if (confirm('Remove the admin password?')) setPassword(''); };
 $('pwPromptDismiss').onclick = async () => { try { await putJSON('/api/password', { dismiss: true }, 'POST'); $('pwPrompt').hidden = true; } catch (e) { toast(e.message); } };
+
+/* ---- sensor diagnostics ---- */
+let sensTimer = null, sensSeq = 0, sensBuf = [], sensBusy = false, sensCfgLoaded = false;
+const num = (v, d = 1) => v == null ? '--' : Number(v).toFixed(d);
+function startSensor() {
+  if (sensTimer) return;
+  sensSeq = 0; sensBuf = [];
+  pollSensor(); sensTimer = setInterval(pollSensor, 250);
+  if (!sensCfgLoaded) api('/api/config').then(c => { $('sProfile').value = c.sensor.profile; $('sAlpha').value = c.sensor.ema_alpha; sensCfgLoaded = true; }).catch(() => {});
+}
+function stopSensor() { clearInterval(sensTimer); sensTimer = null; }
+async function pollSensor() {
+  if (sensBusy) return; sensBusy = true;
+  try {
+    const r = await fetch('/api/sensor?since=' + sensSeq); const d = await r.json();
+    sensSeq = d.next;
+    for (const [t, raw, filt, stt] of d.samples) sensBuf.push({ t, raw, filt, ok: stt === 11 && raw > 0 && raw < 8190 });
+    const cut = d.now_ms - 60000; while (sensBuf.length && sensBuf[0].t < cut) sensBuf.shift();
+    renderSensor(d);
+  } catch (e) { $('sensOff').hidden = false; $('sensOff').textContent = 'Cannot reach the desk: ' + e.message; }
+  sensBusy = false;
+}
+function setDl(id, rows) {
+  const dl = $(id); dl.innerHTML = '';
+  rows.forEach(([k, v]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; dl.append(dt, dd); });
+}
+function stats(a) { if (a.length < 2) return null; const m = a.reduce((x, y) => x + y, 0) / a.length; const sd = Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length); return { m, sd, lo: Math.min(...a), hi: Math.max(...a) }; }
+function renderSensor(d) {
+  const off = $('sensOff'); off.hidden = d.online;
+  off.textContent = 'Sensor offline. Retrying' + (d.retry_in_ms ? ' in ' + (d.retry_in_ms / 1000).toFixed(1) + ' s' : '') + '. Check its wiring.';
+  $('sFilt').textContent = d.valid ? num(d.filtered_mm) : '--';
+  $('sRaw').textContent = d.online ? 'raw ' + d.raw_mm + ' mm · status ' + d.status + ' (' + d.status_text + ')' : 'offline';
+  setDl('sStats', [
+    ['Samples per second', num(d.rate_hz)], ['Std dev 2 s (raw / filtered)', num(d.std_raw_mm, 2) + ' / ' + num(d.std_filt_mm, 2) + ' mm'],
+    ['Filtered span 2 s', num(d.span_filt_mm) + ' mm'], ['Signal rate', num(d.signal_mcps, 2) + ' MCPS'], ['Ambient rate', num(d.ambient_mcps, 2) + ' MCPS'],
+    ['Profile', d.profile + ' (' + d.budget_ms + ' ms)'], ['Filter alpha', num(d.ema_alpha, 2)],
+    ['I2C errors / inits', d.errors + ' / ' + d.inits], ['Touch read errors', d.touch_errors],
+  ]);
+  const last10 = sensBuf.filter(p => p.t >= d.now_ms - 10000);
+  const f = stats(last10.filter(p => p.filt != null).map(p => p.filt)), r = stats(last10.filter(p => p.ok).map(p => p.raw));
+  const bad = last10.filter(p => !p.ok).length;
+  setDl('still', f ? [
+    ['Filtered mean', num(f.m) + ' mm'], ['Filtered std dev', num(f.sd, 2) + ' mm'],
+    ['Filtered min / max', num(f.lo) + ' / ' + num(f.hi) + ' mm (±' + num((f.hi - f.lo) / 2) + ')'],
+    ['Raw std dev', r ? num(r.sd, 2) + ' mm' : '--'], ['Raw min / max', r ? r.lo + ' / ' + r.hi + ' mm' : '--'],
+    ['Bad samples', bad + ' of ' + last10.length],
+  ] : [['', 'collecting…']]);
+  drawPlot(d.now_ms);
+}
+function drawPlot(now) {
+  const c = $('plot'), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  const pts = sensBuf.filter(p => p.t >= now - 30000);
+  const vals = pts.filter(p => p.ok).map(p => p.raw).concat(pts.filter(p => p.filt != null).map(p => p.filt));
+  if (!vals.length) { g.fillStyle = col('--dim'); g.font = '14px system-ui'; g.fillText('no readings', 10, h / 2); return; }
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 20) { const m = (hi + lo) / 2; lo = m - 10; hi = m + 10; }
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const L = 44, X = t => L + (t - (now - 30000)) / 30000 * (w - L - 4), Y = v => 4 + (hi - v) / (hi - lo) * (h - 22);
+  g.font = '11px system-ui'; g.fillStyle = col('--dim'); g.strokeStyle = col('--line'); g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4, y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(w, y); g.stroke(); g.fillText(v.toFixed(0), 2, y + 4); }
+  for (let s = 0; s <= 30; s += 10) g.fillText('-' + (30 - s) + ' s', X(now - 30000 + s * 1000) - (s === 30 ? 24 : 0), h - 4);
+  g.fillStyle = col('--dim'); pts.forEach(p => { if (p.ok) g.fillRect(X(p.t) - 1, Y(p.raw) - 1, 2, 2); });
+  g.fillStyle = col('--bad'); pts.forEach(p => { if (!p.ok) g.fillRect(X(p.t) - 1.5, h - 20, 3, 6); });
+  g.strokeStyle = col('--accent'); g.lineWidth = 2; g.beginPath(); let pen = false;
+  pts.forEach(p => { if (p.filt == null) { pen = false; return; } const x = X(p.t), y = Y(p.filt); pen ? g.lineTo(x, y) : g.moveTo(x, y); pen = true; });
+  g.stroke();
+}
+$('sSave').onclick = async () => {
+  try {
+    await putJSON('/api/config', { sensor: { profile: $('sProfile').value, ema_alpha: Number($('sAlpha').value) } });
+    sensBuf = []; toast('Sensor settings applied');
+  } catch (e) { toast(e.message, 5000); }
+};
 
 /* ---- system ---- */
 async function loadSystem() {

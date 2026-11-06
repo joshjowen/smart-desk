@@ -15,10 +15,17 @@ extern "C" {
  * Does NOT touch the opto pins in stage 0. */
 void board_early_init(void);
 
-/* Shared onboard I2C bus (touch, IMU, later the VL53L0X). */
+/* Shared onboard I2C bus (touch, IMU, VL53L0X). */
 esp_err_t board_i2c_init(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
 void board_i2c_scan(void);
+/* Bus mutex (recursive) shared by touch and the VL53L0X. */
+bool board_i2c_lock(uint32_t timeout_ms);
+void board_i2c_unlock(void);
+/* Clocks out a stuck bus (after timeouts). */
+void board_i2c_recover(void);
+/* Touch reads that failed and were reported as "released". */
+uint32_t board_touch_errors(void);
 
 esp_err_t board_display_init(esp_lcd_panel_io_handle_t *io, esp_lcd_panel_handle_t *panel, size_t max_transfer_bytes);
 esp_err_t board_touch_init(esp_lcd_touch_handle_t *touch);

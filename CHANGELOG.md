@@ -1,5 +1,30 @@
 # Changelog
 
+## Stage 3: Sensor test with raw readings (0.3.0) — 2026-11-06
+
+- `vl53l0x`: register-level driver ported from Pololu's library (ST init sequence: SPAD setup, tuning
+  settings, VHV and phase reference calibration), back-to-back continuous ranging, non-blocking
+  sample reads with range status, signal and ambient rate.
+- `height`: sensor task (10 ms poll). Bad range status dropped; median of 5, then EMA (alpha 0.3);
+  invalid after 500 ms without a good sample. 60 s sample history. Sensor errors mark it offline at
+  once and re-init with back-off (0.5–5 s), so hot-unplug/replug recovers without a reboot.
+  Readings are not used for control yet.
+- Settings v3: ranging profile (default 50 ms, high accuracy 200 ms) and filter alpha, both
+  applied live. Kconfig: `DESK_HEIGHT_BUDGET_MS`, `DESK_HEIGHT_BUDGET_ACCURATE_MS`, `DESK_HEIGHT_EMA_PCT`.
+- Shared I2C bus guarded by a recursive mutex. Fix: a failed touch read made esp_lvgl_port abort, so a
+  sensor fault on the bus rebooted the board in a loop. Touch reads now go through the mutex and an
+  error reads as "not touched" (which also ends a touch jog). The boot scan gives up after 3 timeouts
+  with a wiring hint and resets the bus.
+- Display: sensor distance or "sensor offline" under the height; long-press the status row for a
+  sensor debug screen.
+- Web: Sensor tab (live stats, 30 s plot, 10 s stillness summary, CSV of 60 s, profile/alpha).
+  `GET /api/sensor?since=<seq>`, `GET /api/sensor.csv`; status JSON gains `sensor {online, valid, mm}`.
+- Console: `sensor` command.
+- Tested on the desk: readings track smoothly both ways (~15.5 mm/s, ~480 mm of travel, reading rises
+  going up); stillness within ±1 mm (bottom), ±2 mm (middle), ±3 mm (top) filtered, no bad samples.
+  Touch and display stay responsive with the sensor running; the debug screen works. The hot-unplug
+  test is deferred until the wiring is permanent (the jumper wires are fragile).
+
 ## Stage 2: Up and down control without the sensor (0.2.0) — 2026-11-05
 
 - The real desk is driven through the PC817 optos in source mode (GPIO high = button pressed).

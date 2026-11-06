@@ -7,6 +7,9 @@
 #include "esp_log.h"
 #include "esp_lcd_jd9853.h"
 #include "esp_lcd_touch_axs5106.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "board";
 
@@ -18,6 +21,9 @@ static const char *TAG = "board";
 #define BL_LEDC_HZ      5000
 
 static i2c_master_bus_handle_t s_i2c_bus;
+static SemaphoreHandle_t s_i2c_mutex;
+static esp_err_t (*s_touch_read)(esp_lcd_touch_handle_t tp);
+static uint32_t s_touch_errors;
 static uint8_t s_backlight;
 
 void board_early_init(void)
@@ -44,7 +50,58 @@ esp_err_t board_i2c_init(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
+    s_i2c_mutex = xSemaphoreCreateRecursiveMutex();
     return i2c_new_master_bus(&cfg, &s_i2c_bus);
+}
+
+bool board_i2c_lock(uint32_t timeout_ms)
+{
+    return xSemaphoreTakeRecursive(s_i2c_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void board_i2c_unlock(void)
+{
+    xSemaphoreGiveRecursive(s_i2c_mutex);
+}
+
+void board_i2c_recover(void)
+{
+    if (board_i2c_lock(200)) {
+        esp_err_t e = i2c_master_bus_reset(s_i2c_bus);
+        board_i2c_unlock();
+        ESP_LOGW(TAG, "I2C bus reset: %s", esp_err_to_name(e));
+    }
+}
+
+uint32_t board_touch_errors(void)
+{
+    return s_touch_errors;
+}
+
+/* Touch reads go through the bus lock, and an I2C error reads as "not touched"
+ * instead of an error: esp_lvgl_port aborts on a failed read, so a sensor
+ * fault on the shared bus would otherwise reboot the board. Reading as
+ * released is the safe direction (it ends any touch jog). */
+static esp_err_t touch_read_guarded(esp_lcd_touch_handle_t tp)
+{
+    esp_err_t e = ESP_ERR_TIMEOUT;
+    if (board_i2c_lock(30)) {
+        e = s_touch_read(tp);
+        board_i2c_unlock();
+    }
+    if (e != ESP_OK) {
+        portENTER_CRITICAL(&tp->data.lock);
+        tp->data.points = 0;
+        portEXIT_CRITICAL(&tp->data.lock);
+        static int64_t last_log_us;
+        int64_t now = esp_timer_get_time();
+        if (s_touch_errors++ == 0 || now - last_log_us > 5000000) {
+            ESP_LOGW(TAG, "touch read failed (%s), %lu so far: treating as released", esp_err_to_name(e),
+                     (unsigned long)s_touch_errors);
+            last_log_us = now;
+        }
+    }
+    return ESP_OK;
 }
 
 i2c_master_bus_handle_t board_i2c_bus(void)
@@ -56,10 +113,22 @@ void board_i2c_scan(void)
 {
     char line[96];
     int n = 0, found = 0;
+    int timeouts = 0;
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        if (i2c_master_probe(s_i2c_bus, addr, 20) == ESP_OK) {
+        if (!board_i2c_lock(100)) {
+            continue;
+        }
+        esp_err_t e = i2c_master_probe(s_i2c_bus, addr, 20);
+        board_i2c_unlock();
+        if (e == ESP_OK) {
             n += snprintf(line + n, sizeof(line) - n, " 0x%02x", addr);
             found++;
+        } else if (e == ESP_ERR_TIMEOUT && ++timeouts >= 3) {
+            /* Every probe timing out means SDA or SCL is held low (wiring, or an
+             * unpowered device on the bus). Don't spend 2 s logging 112 errors. */
+            ESP_LOGE(TAG, "I2C scan: bus not responding (SDA/SCL held low?). Check the sensor wiring and power.");
+            board_i2c_recover();
+            return;
         }
     }
     ESP_LOGI(TAG, "I2C scan: %d device(s):%s", found, found ? line : " none");
@@ -135,6 +204,8 @@ esp_err_t board_touch_init(esp_lcd_touch_handle_t *touch)
         .flags = { .swap_xy = BOARD_TP_SWAP_XY, .mirror_x = BOARD_TP_MIRROR_X, .mirror_y = BOARD_TP_MIRROR_Y },
     };
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_axs5106(dev, &cfg, touch), TAG, "touch");
+    s_touch_read = (*touch)->read_data;
+    (*touch)->read_data = touch_read_guarded;
     ESP_LOGI(TAG, "AXS5106L touch ready");
     return ESP_OK;
 }
