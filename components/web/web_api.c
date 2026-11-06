@@ -355,6 +355,14 @@ cJSON *web_status_json(void)
     cJSON_AddNumberToObject(o, "last_error_seq", st.last_error_seq);
     cJSON_AddStringToObject(o, "units", c.units_cm ? "cm" : "mm");
     cJSON_AddBoolToObject(o, "calibrated", st.calibrated);
+    cJSON *ls = cJSON_AddObjectToObject(o, "last_seek");
+    cJSON_AddNumberToObject(ls, "seq", st.last_seek.seq);
+    cJSON_AddNumberToObject(ls, "target_mm", st.last_seek.target_mm);
+    cJSON_AddNumberToObject(ls, "final_mm", st.last_seek.final_mm);
+    cJSON_AddNumberToObject(ls, "error_mm", st.last_seek.error_mm);
+    cJSON_AddBoolToObject(ls, "corrected", st.last_seek.corrected);
+    cJSON_AddNumberToObject(o, "coast_up_mm", round(st.coast_up_mm * 10) / 10);
+    cJSON_AddNumberToObject(o, "coast_down_mm", round(st.coast_down_mm * 10) / 10);
     cJSON_AddNumberToObject(o, "min_mm", st.min_mm);
     cJSON_AddNumberToObject(o, "max_mm", st.max_mm);
     cJSON_AddItemToObject(o, "cal", cal_session_json(&st.cal_session));

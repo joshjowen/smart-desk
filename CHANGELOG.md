@@ -1,5 +1,27 @@
 # Changelog
 
+## Stage 5: Enable presets (0.5.0) — 2026-11-06
+
+- Seeks: release early by the learned coast + 2 mm, settle (< 2 mm over 500 ms, max 2 s), at most one
+  correction pulse (error / speed, ≥ 150 ms), report final height and error (`last_seek`). Refused when
+  uncalibrated, cooling down, faulted, sensor invalid, < 10 s budget, or out of range (with the range in
+  the message).
+- Coast learning: EMA (alpha 0.2) after approaches ≥ 2 s, bounded to ±50 % of the calibrated coast,
+  persisted at most hourly (`coast` NVS record), reset by a new calibration, kept by Correct height.
+- Invariant 6: stall check for JOG and SEEK (< 5 mm in 1.5 s once the output has been on 2 s) → FAULT;
+  a jog held into an end stop just stops ("At the top / bottom"). Plausibility check for seeks
+  (> 1.5 × speed) → FAULT. Lost reading during a seek → FAULT.
+- Display: presets enabled; long-press a preset to save the current height; a message shows where the
+  desk landed. Web: preset buttons enabled; "Here" button per preset row in Settings; landing message.
+- Presets updated for the calibrated range: Sit 730 mm (was 720, below the 730 mm usable minimum),
+  Stand 1100 mm.
+- Kconfig: `DESK_SEEK_MARGIN_MM` (2), `DESK_COAST_LEARN_PCT` (20).
+- Stage 3's deferred hot-unplug test done by Josh: offline shown, recovers without a reboot.
+- Tested on the desk: 10 Sit/Stand seeks (web) all within ±5 mm without corrections; a 12 mm seek
+  corrected to +2 mm. Twice the control box locked out after heavy use (needed a power cycle); the
+  stall check stopped and faulted within 1.5 s both times. The longer accuracy and back-to-back
+  duty runs were stopped there at Josh's call.
+
 ## Stage 4: Sensor calibration routine (0.4.0) — 2026-11-06
 
 - Calibration routine in `motion` (`calib.c`): budget check (waits and opens by itself when there is

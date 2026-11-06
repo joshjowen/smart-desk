@@ -78,6 +78,16 @@ menu "Desk motion"
         int "Seek tolerance (+/- mm)"
         default 8
 
+    config DESK_SEEK_MARGIN_MM
+        int "Seek: release this much before the coast distance (mm)"
+        range 0 20
+        default 2
+
+    config DESK_COAST_LEARN_PCT
+        int "Seek: coast learning rate (EMA alpha, percent)"
+        range 0 100
+        default 20
+
     config DESK_MAX_MOVE_S_UNCAL
         int "Max single move time before calibration (s)"
         default 25

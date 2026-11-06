@@ -135,6 +135,13 @@ typedef struct {
     motion_cal_t cal;             /* active calibration (valid if calibrated) */
     motion_cal_status_t cal_session;
     uint32_t max_move_s;
+    /* Result of the last completed seek (stage 5). seq increments with each one. */
+    struct {
+        uint32_t seq;
+        int32_t target_mm, final_mm, error_mm;
+        bool corrected;
+    } last_seek;
+    float coast_up_mm, coast_down_mm;   /* learned coast in desk mm (what seeks use) */
 } motion_status_t;
 
 esp_err_t motion_init(void);
@@ -182,6 +189,11 @@ const char *motion_cal_check(const motion_cal_t *c);
 esp_err_t motion_set_calibration(const motion_cal_t *c);
 /* Boot: installs the stored calibration directly (before motion_init). */
 void motion_load_calibration(const motion_cal_t *c);
+/* Learned coast distances (sensor mm, as in motion_cal_t). Load at boot after the
+ * calibration; out-of-bounds values are ignored. The callback is called from the
+ * motion task at most once an hour when they change, to persist them. */
+void motion_load_learned_coast(float up, float down);
+void motion_set_learn_cb(void (*cb)(float up, float down));
 /* Called from the motion task when a calibration is saved by the routine or installed by import. */
 void motion_set_cal_saved_cb(void (*cb)(const motion_cal_t *c));
 

@@ -342,6 +342,36 @@ static void jog_event_cb(lv_event_t *e)
     }
 }
 
+static void toast(const char *text);
+
+static void preset_save_cb(lv_event_t *e)
+{
+    motion_preset_t p = (motion_preset_t)(intptr_t)lv_event_get_user_data(e);
+    motion_status_t st;
+    motion_get_status(&st);
+    char msg[64];
+    if (!st.calibrated || !st.height_valid) {
+        toast("Height unknown: can't save the preset");
+        return;
+    }
+    if (st.height_mm < st.min_mm || st.height_mm > st.max_mm) {
+        snprintf(msg, sizeof(msg), "%ld mm is outside %ld-%ld mm", (long)st.height_mm, (long)st.min_mm, (long)st.max_mm);
+        toast(msg);
+        return;
+    }
+    desk_config_t c;
+    config_get(&c);
+    c.presets[p].mm = st.height_mm;
+    c.presets[p].enabled = true;
+    char err[96];
+    if (config_update(&c, err, sizeof(err)) == ESP_OK) {
+        snprintf(msg, sizeof(msg), "%s saved: %ld mm", c.presets[p].name, (long)st.height_mm);
+    } else {
+        strlcpy(msg, err, sizeof(msg));
+    }
+    toast(msg);
+}
+
 static void preset_event_cb(lv_event_t *e)
 {
     motion_preset_t p = (motion_preset_t)(intptr_t)lv_event_get_user_data(e);
@@ -457,7 +487,9 @@ static lv_obj_t *make_preset(lv_obj_t *parent, const char *name, motion_preset_t
     *lbl = make_label(b, &lv_font_montserrat_14, COL_TEXT, name);
     lv_obj_set_style_text_align(*lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(*lbl);
-    lv_obj_add_event_cb(b, preset_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)id);
+    /* Tap = go there; long press = save the current height as this preset. */
+    lv_obj_add_event_cb(b, preset_event_cb, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)id);
+    lv_obj_add_event_cb(b, preset_save_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)id);
     return b;
 }
 
@@ -1104,6 +1136,12 @@ static void status_timer_cb(lv_timer_t *t)
     if (!s_have_last || memcmp(&st, &s_last, sizeof(st)) != 0) {
         if (s_have_last && st.last_error_seq != s_last.last_error_seq) {
             toast(st.last_error);
+        }
+        if (s_have_last && st.last_seek.seq != s_last.last_seek.seq) {
+            char m[64], h[16];
+            fmt_height(h, sizeof(h), true, st.last_seek.final_mm);
+            snprintf(m, sizeof(m), "At %s %s (%+ld mm)", h, unit_str(), (long)st.last_seek.error_mm);
+            toast(m);
         }
         /* Wake the screen when something needs attention. */
         if (s_have_last && st.state != s_last.state &&

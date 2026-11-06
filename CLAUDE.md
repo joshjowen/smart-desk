@@ -28,15 +28,20 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 - **Stage 2 (real optos, hold-to-run): done and tested on the desk.** Source mode, active-high.
   The external 10 kΩ pull-downs are NOT fitted (Josh accepted the risk; no movement seen on
   reset/crash/flash).
-- **Stage 3 (VL53L0X raw readings): done and accepted on the desk.** Hot-unplug test deferred by
-  Josh until the wiring is permanent: run it after the final stage.
+- **Stage 3 (VL53L0X raw readings): done and accepted on the desk** (hot-unplug test done later).
 - **Stage 4 (calibration): done and accepted on the desk** (display flow, touch cancel, Correct height
-  and a full run from the screen tested by Josh). Waiting for Josh to say go before stage 5 (presets).
+  and a full run from the screen tested by Josh).
+- **Stage 5 (presets): done and accepted.** 10 Sit/Stand seeks within ±5 mm. Waiting for Josh to say
+  go before stage 6 (MQTT / Home Assistant).
+- The control box has its own protection that locks the desk out after heavy use (stricter than the
+  firmware's 120 s / 20 min); only a power cycle of the box clears it. Don't run long motor tests;
+  Josh doesn't want exhaustive hardware test runs. If the desk stops responding, it's this (or a loose
+  jumper), not the firmware.
   Calibrated 2026-11-06: 725-1171 mm, scale 0.931 (tape: 725 bottom, 954 mid, 1163 top). Routine order differs from the spec to fit the
   duty budget; "Correct height" (scale factor) is an addition (README "Calibration").
 - Reflashing restarts the duty ledger's expiry (up to 20 min before budget frees up): plan motor tests
   around flashes.
-- Stages 5–6 not started.
+- Stage 6 not started.
 - Firmware really moves the desk. Josh has said it is safe for Claude to drive it (2026-11-06): the
   control box stops by itself at both end stops. Jog over the WebSocket (`jog` + `hb` every 100 ms,
   then `stop`). Keep the heartbeat in its own task: a blocking HTTP/mDNS call in the same loop starves

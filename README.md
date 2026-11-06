@@ -4,9 +4,9 @@ ESP-IDF firmware for a Waveshare ESP32-C6-Touch-LCD-1.47 that drives an Otto Cha
 simulating handset button presses through PC817 optocouplers. The full plan is in
 [desk-controller-spec.md](desk-controller-spec.md); progress is in [CHANGELOG.md](CHANGELOG.md).
 
-**Current stage: 4 (calibration; real desktop height shown, hold-to-run only).** The optos are driven
-in source mode (GPIO high = button pressed). After calibration the display and web show the desktop
-height; presets are enabled in stage 5.
+**Current stage: 5 (presets).** The optos are driven in source mode (GPIO high = button pressed). After
+calibration the display and web show the desktop height, and the presets drive the desk there on their
+own.
 
 ## Build and flash
 
@@ -67,8 +67,10 @@ the router/gateway), then pool.ntp.org. It is only used for log timestamps.
 
 - Boots to the **lock screen**: current height, status icons (Wi-Fi/MQTT placeholders, fault warning),
   and a slide-to-unlock knob. Drag it at least 85 % of the way; a shorter slide springs back.
-- **Control screen**: hold ▲ / ▼ to move the simulated desk (it stops on release), tap SIT / STAND to
-  seek. While seeking, a touch anywhere stops it. "Lock" returns to the lock screen.
+- **Control screen**: hold ▲ / ▼ to move the desk (it stops on release), tap SIT / STAND to go there.
+  While it is moving on its own, a touch anywhere stops it. **Long-press** SIT / STAND to save the
+  current height as that preset. A message shows where the desk landed. "Lock" returns to the lock
+  screen.
 - Auto-locks after 30 s without a touch; dims after 60 s locked. The first touch on a dim screen only
   wakes it.
 - The line under the height shows the sensor's filtered distance ("sensor 80 mm (uncalibrated)"), or
@@ -140,6 +142,9 @@ If the screen goes black and the board keeps rebooting with `probe device timeou
 sensor is holding the bus low: check its VIN/GND (an unpowered breakout pulls SDA/SCL down) and that
 SDA/SCL go to GPIO18/19. The boot scan now reports "bus not responding" in that case.
 
+Hot-unplug test (done 2026-11-06, after stage 4): unplugging the sensor shows "sensor offline" at once;
+plugging it back in brings the reading back without a reboot.
+
 **Stillness noise** (desk still for 10 s, default profile, measured 2026-11-06 with the sensor mounted):
 
 | Position | Filtered mean | Filtered std dev | Filtered min/max | Raw std dev | Raw min/max | Signal |
@@ -202,6 +207,45 @@ those points gives `scale` 0.931, so the desk is 725-1170 mm; displayed vs tape 
 
 Cancel tests: web STOP while heading for the top, and web Cancel during a coast test: output off
 within 1 ms, old calibration unchanged.
+
+## Presets (stage 5)
+
+A preset (display tap, web button, console `goto <mm>`) is refused if the desk isn't calibrated, is
+cooling down or faulted, the sensor is invalid, less than 10 s of motor time is left, or the target is
+outside the usable range (no clamping). Within ±8 mm it does nothing. Otherwise:
+
+1. Drive towards the target and release when the remaining distance is at most the learned coast
+   for that direction + 2 mm (`DESK_SEEK_MARGIN_MM`).
+2. Settle: wait until the reading changes < 2 mm over 500 ms (2 s at most).
+3. If still more than ±8 mm out (`DESK_SEEK_TOLERANCE_MM`), one correction pulse
+   (error / speed, at least 150 ms), then settle again. Never more than one.
+4. Learn: after an approach that ran at least 2 s, move the coast for that direction 20 % of the way
+   to the observed one (`DESK_COAST_LEARN_PCT`), within ±50 % of the calibrated value. Saved at most
+   once an hour; a new calibration resets it.
+5. Report the final height and error (display and web message, `last_seek` in the status JSON).
+
+Safety added in this stage:
+
+- **Stall** (invariant 6, JOG and SEEK once calibrated): if the height changes < 5 mm over 1.5 s
+  while the output has been on for at least 2 s (the first 2 s are skipped for the soft start and filter
+  lag), stop and FAULT "Desk not moving". A jog held into an end stop (within 15 mm of it) just stops
+  with "At the top / bottom" instead.
+- **Plausibility** (seeks): a reading that changes faster than 1.5 × the calibrated speed (+3 mm
+  noise allowance, over 0.5 s) means something is in the beam: stop and FAULT. A lost reading during a
+  seek is a FAULT too.
+- Any touch on the screen, STOP (web/console) or a sensed handset press stops a seek at once.
+
+Tested (2026-11-06): 10 Sit/Stand seeks via the web preset buttons, all within ±5 mm of the target
+(Stand −1 to −4 mm, Sit +2 to +5 mm), no corrections needed; small seeks get one correction pulse
+(e.g. 12 mm away → +2 mm). Settles ~1.2 s after release. The learned coast drifted from ~12.5 to
+~11 mm over those runs.
+
+**Control box lockout.** Twice after heavy use (calibration + tests; ~10 back-to-back seeks) the
+control box stopped the desk mid-move and ignored it (firmware and handset) until its power was
+cycled. That looks like the box's own overload/duty protection, which seems stricter than the
+firmware's 120 s per 20 min budget. Both times the stall check stopped driving within 1.5 s and
+raised "Desk not moving (stall)". If that fault appears with no obstruction, power-cycle the control
+box. Lowering `DESK_DUTY_MAX_ON_S` would make the firmware rest the desk before the box does.
 
 ## Wiring
 

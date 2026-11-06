@@ -59,6 +59,18 @@ static void on_cal_saved(const motion_cal_t *c)
     ESP_LOGI(TAG, "calibration stored (%s), height range now %ld-%ld mm", esp_err_to_name(e), (long)lo, (long)hi);
 }
 
+typedef struct {
+    uint32_t version;
+    float up, down;
+} learned_coast_t;
+
+static void on_coast_learned(float up, float down)
+{
+    learned_coast_t lc = { 1, up, down };
+    esp_err_t e = config_blob_save("coast", &lc, sizeof(lc));
+    ESP_LOGI(TAG, "learned coast stored: up %.1f down %.1f (%s)", up, down, esp_err_to_name(e));
+}
+
 static void mark_valid_cb(void *arg)
 {
     const esp_partition_t *run = esp_ota_get_running_partition();
@@ -95,11 +107,16 @@ void app_main(void)
             ESP_LOGW(TAG, "stored calibration ignored: %s", bad);
         } else {
             motion_load_calibration(&cal);
+            learned_coast_t lc;
+            if (config_blob_load("coast", &lc, sizeof(lc)) == ESP_OK && lc.version == 1) {
+                motion_load_learned_coast(lc.up, lc.down);
+            }
         }
     } else {
         ESP_LOGW(TAG, "not calibrated");
     }
     motion_set_cal_saved_cb(on_cal_saved);
+    motion_set_learn_cb(on_coast_learned);
     ESP_ERROR_CHECK(motion_init());
 
     desk_config_t cfg;

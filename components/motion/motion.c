@@ -6,6 +6,7 @@
  *   3  hold-to-run: jog stops 300 ms after the last heartbeat
  *   4  max single move time -> FAULT
  *   5  duty-cycle ledger (RTC memory) -> refuse seeks / COOLDOWN
+ *   6  stall check (JOG / SEEK with a calibrated sensor) and plausibility (SEEK)
  *   7  STOP from any source wins
  *   9  task watchdog on this task
  * Calibration (stage 4) runs inside this task through calib.c.
@@ -34,7 +35,18 @@ static const char *TAG = "motion";
 #define TICK_MS              20
 #define HEARTBEAT_TIMEOUT_US (300 * 1000)
 #define DIR_CHANGE_OFF_US    (300 * 1000)
-#define SETTLE_US            (300 * 1000)
+#define SETTLE_STEADY_MS     500    /* settle: change < SETTLE_MM over this long */
+#define SETTLE_MM            2
+#define SETTLE_MAX_MS        2000
+#define NUDGE_MIN_MS         150
+#define STALL_WINDOW_MS      1500   /* invariant 6: >= 5 mm within 1.5 s ... */
+#define STALL_MIN_MM         5
+#define STALL_AFTER_MS       2000   /* ... checked once the output has been on 2 s (soft start + filter lag) */
+#define END_ZONE_MM          15     /* a jog stalling this close to an end stop just stopped there */
+#define PLAUS_WINDOW_MS      500    /* plausibility: no faster than 1.5 x speed (+3 mm noise) over 0.5 s */
+#define PLAUS_NOISE_MM       3
+#define LEARN_PERSIST_US     (3600LL * 1000000)
+#define HIST_N               128    /* heights at each 20 ms tick: 2.5 s */
 #define SEEK_MIN_BUDGET_MS   (10 * 1000)
 #define COOLDOWN_EXIT_MS     (10 * 1000)
 #define END_STOP_MARGIN_MM   5
@@ -59,7 +71,27 @@ static motion_source_t s_src = MOTION_SRC_SYSTEM; /* source of the current move 
 static motion_dir_t s_jog_dir;
 static int64_t s_jog_deadline_us;
 static int32_t s_target_mm;
-static int64_t s_settle_until_us;
+
+/* seek sub-state (stage 5) */
+typedef enum { SK_APPROACH, SK_SETTLE1, SK_NUDGE, SK_SETTLE2 } seek_phase_t;
+static seek_phase_t s_sk;
+static motion_dir_t s_sk_dir;          /* direction of the current approach / nudge */
+static int32_t s_sk_release_h;         /* height when the approach was released */
+static int64_t s_sk_t_us;              /* phase start (settle) or nudge output-on time */
+static uint32_t s_sk_nudge_ms;
+static bool s_sk_corrected;
+static struct { uint32_t seq; int32_t target_mm, final_mm, error_mm; bool corrected; } s_last_seek;
+
+/* height history for settle / stall / plausibility */
+static int32_t s_hist_h[HIST_N];
+static int64_t s_hist_t[HIST_N];
+static int s_hist_n, s_hist_i;
+
+/* learned coast (sensor mm) */
+static float s_coast[2];               /* [0] up, [1] down */
+static bool s_coast_dirty;
+static int64_t s_coast_saved_us = -LEARN_PERSIST_US;
+static void (*s_learn_cb)(float up, float down);
 static char s_fault[48];
 static char s_last_fault[48];
 static portMUX_TYPE s_preset_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -136,11 +168,7 @@ static bool height_read(int32_t *mm)
 #endif
 
 /* Presets / seeks are enabled in stage 5. */
-#if CONFIG_DESK_SIMULATOR
 #define SEEKS_ENABLED 1
-#else
-#define SEEKS_ENABLED 0
-#endif
 
 /* ---- optional handset sense ---- */
 #if CONFIG_DESK_HANDSET_SENSE
@@ -249,6 +277,105 @@ static bool moving_state(void)
            s_state == MOTION_CALIBRATING;
 }
 
+/* ---- height history ---- */
+
+static void hist_clear(void)
+{
+    s_hist_n = s_hist_i = 0;
+}
+
+static void hist_add(int64_t now, int32_t h)
+{
+    s_hist_h[s_hist_i] = h;
+    s_hist_t[s_hist_i] = now;
+    s_hist_i = (s_hist_i + 1) % HIST_N;
+    if (s_hist_n < HIST_N) s_hist_n++;
+}
+
+/* Height `ago_ms` ago (newest sample at least that old). */
+static bool hist_at(int64_t now, uint32_t ago_ms, int32_t *h)
+{
+    for (int k = 1; k <= s_hist_n; k++) {
+        int i = (s_hist_i - k + HIST_N) % HIST_N;
+        if (now - s_hist_t[i] >= (int64_t)ago_ms * 1000) {
+            *h = s_hist_h[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+/* max - min over the last win_ms; false if the history doesn't cover it. */
+static bool hist_span(int64_t now, uint32_t win_ms, int32_t *span)
+{
+    int32_t lo = INT32_MAX, hi = INT32_MIN;
+    bool covered = false;
+    for (int k = 1; k <= s_hist_n; k++) {
+        int i = (s_hist_i - k + HIST_N) % HIST_N;
+        if (now - s_hist_t[i] > (int64_t)win_ms * 1000) {
+            covered = true;
+            break;
+        }
+        lo = s_hist_h[i] < lo ? s_hist_h[i] : lo;
+        hi = s_hist_h[i] > hi ? s_hist_h[i] : hi;
+    }
+    *span = hi - lo;
+    return covered;
+}
+
+/* ---- desk model in desk mm ---- */
+
+static float speed_mm_s(motion_dir_t d)
+{
+#if CONFIG_DESK_SIMULATOR
+    return CONFIG_DESK_SIM_SPEED_MM_S;
+#else
+    return s_cal.scale * (d == MOTION_DIR_UP ? s_cal.speed_up : s_cal.speed_down);
+#endif
+}
+
+static float coast_mm(motion_dir_t d)
+{
+#if CONFIG_DESK_SIMULATOR
+    return 0;
+#else
+    return s_cal.scale * s_coast[d == MOTION_DIR_UP ? 0 : 1];
+#endif
+}
+
+#if !CONFIG_DESK_SIMULATOR
+static void coast_bounds(int i, float *lo, float *hi)
+{
+    float cal = i == 0 ? s_cal.coast_up : s_cal.coast_down;
+    *lo = cal * 0.5f;
+    *hi = cal * 1.5f > 1.0f ? cal * 1.5f : 1.0f;
+}
+
+static void learn_coast(motion_dir_t d, float observed_desk_mm)
+{
+    int i = d == MOTION_DIR_UP ? 0 : 1;
+    float obs = observed_desk_mm / s_cal.scale, lo, hi;
+    coast_bounds(i, &lo, &hi);
+    float before = s_coast[i];
+    float v = before + CONFIG_DESK_COAST_LEARN_PCT / 100.0f * (obs - before);
+    s_coast[i] = v < lo ? lo : v > hi ? hi : v;
+    s_coast_dirty |= s_coast[i] != before;
+    ESP_LOGI(TAG, "coast %s: observed %.1f, learned %.1f -> %.1f (sensor mm)", i ? "down" : "up", obs, before, s_coast[i]);
+}
+#endif
+
+static void seek_done(int32_t h)
+{
+    s_last_seek.seq++;
+    s_last_seek.target_mm = s_target_mm;
+    s_last_seek.final_mm = h;
+    s_last_seek.error_mm = h - s_target_mm;
+    s_last_seek.corrected = s_sk_corrected;
+    ESP_LOGI(TAG, "seek done: %ld mm (target %ld, error %+ld%s)", (long)h, (long)s_target_mm,
+             (long)(h - s_target_mm), s_sk_corrected ? ", after one correction" : "");
+    set_state(MOTION_IDLE, "seek done");
+}
+
 static void start_seek(const motion_req_t *r, int32_t target)
 {
     int32_t h;
@@ -258,7 +385,12 @@ static void start_seek(const motion_req_t *r, int32_t target)
     if (!s_calibrated) { reject(r, "Needs calibration"); return; }
     if (!SEEKS_ENABLED) { reject(r, "Presets arrive in stage 5"); return; }
     if (!height_read(&h)) { reject(r, "Height sensor invalid"); return; }
-    if (target < s_min_mm || target > s_max_mm) { reject(r, "Target out of range"); return; }
+    if (target < s_min_mm || target > s_max_mm) {
+        char m[48];
+        snprintf(m, sizeof(m), "Target %ld mm is outside %ld-%ld mm", (long)target, (long)s_min_mm, (long)s_max_mm);
+        reject(r, m);
+        return;
+    }
     if (duty_remaining_ms() < SEEK_MIN_BUDGET_MS) { reject(r, "Duty budget low"); return; }
     if (abs(target - h) <= CONFIG_DESK_SEEK_TOLERANCE_MM) {
         ESP_LOGI(TAG, "seek to %ld: already there (%ld)", (long)target, (long)h);
@@ -270,11 +402,15 @@ static void start_seek(const motion_req_t *r, int32_t target)
     }
     s_src = r->source;
     s_target_mm = target;
+    s_sk = SK_APPROACH;
+    s_sk_dir = target > h ? MOTION_DIR_UP : MOTION_DIR_DOWN;
+    s_sk_corrected = false;
     set_state(MOTION_SEEK, "seek request");
-    ESP_LOGI(TAG, "seek %ld -> %ld mm src=%s", (long)h, (long)target, motion_source_name(r->source));
+    ESP_LOGI(TAG, "seek %ld -> %ld mm src=%s (release %.1f mm early)", (long)h, (long)target,
+             motion_source_name(r->source), coast_mm(s_sk_dir) + CONFIG_DESK_SEEK_MARGIN_MM);
 }
 
-static void apply_calibration(const motion_cal_t *c);
+static void apply_calibration(const motion_cal_t *c, bool reset_learned);
 
 /* A tape-measured height at the current position. Far enough from the bottom it
  * corrects the scale (keeping h_min); near the bottom it corrects h_min. */
@@ -302,7 +438,7 @@ static void correct_height(const motion_req_t *r)
         ESP_LOGI(TAG, "height correction near the bottom: h_min %ld -> %ld mm", (long)c.h_min_mm, (long)hmin);
         c.h_min_mm = hmin;
     }
-    apply_calibration(&c);
+    apply_calibration(&c, false);   /* coasts are in sensor mm: still valid */
     if (s_cal_saved_cb) {
         s_cal_saved_cb(&s_cal);
     }
@@ -458,7 +594,7 @@ const char *motion_cal_check(const motion_cal_t *c)
     return NULL;
 }
 
-static void apply_calibration(const motion_cal_t *c)
+static void apply_calibration(const motion_cal_t *c, bool reset_learned)
 {
 #if CONFIG_DESK_SIMULATOR
     (void)c;
@@ -485,6 +621,11 @@ static void apply_calibration(const motion_cal_t *c)
     float slow = fminf(c->speed_up, c->speed_down);
     s_max_move_us = (int64_t)(travel / slow * 1.3f * 1000000);
     s_calibrated = true;
+    if (reset_learned) {
+        s_coast[0] = c->coast_up;
+        s_coast[1] = c->coast_down;
+        s_coast_dirty = true;   /* persist the reset too */
+    }
     ESP_LOGI(TAG, "calibration: %ld-%ld mm (usable %ld-%ld), scale %.4f, speed up %.1f down %.1f mm/s, coast up %.1f "
              "down %.1f mm, max move %.1f s", (long)c->h_min_mm, (long)h_max, (long)s_min_mm, (long)s_max_mm, c->scale,
              c->speed_up * c->scale, c->speed_down * c->scale, c->coast_up * c->scale, c->coast_down * c->scale,
@@ -506,7 +647,31 @@ esp_err_t motion_set_calibration(const motion_cal_t *c)
 
 void motion_load_calibration(const motion_cal_t *c)
 {
-    apply_calibration(c);
+    apply_calibration(c, true);
+    s_coast_dirty = false;   /* boot load: nothing new to persist */
+}
+
+void motion_load_learned_coast(float up, float down)
+{
+#if !CONFIG_DESK_SIMULATOR
+    if (!s_calibrated) {
+        return;
+    }
+    float v[2] = { up, down };
+    for (int i = 0; i < 2; i++) {
+        float lo, hi;
+        coast_bounds(i, &lo, &hi);
+        if (v[i] >= lo && v[i] <= hi) {
+            s_coast[i] = v[i];
+        }
+    }
+    ESP_LOGI(TAG, "learned coast: up %.1f down %.1f (sensor mm)", s_coast[0], s_coast[1]);
+#endif
+}
+
+void motion_set_learn_cb(void (*cb)(float up, float down))
+{
+    s_learn_cb = cb;
 }
 
 void motion_set_cal_saved_cb(void (*cb)(const motion_cal_t *c))
@@ -567,6 +732,45 @@ static void step(uint32_t dt_ms)
         set_state(MOTION_IDLE, "cooldown over");
     }
 
+    /* Height history for settle / stall / plausibility. */
+    if (h_ok) {
+        hist_add(now, h);
+    } else {
+        hist_clear();
+    }
+
+    /* Plausibility (seeks): the reading can't change faster than 1.5 x the desk's speed. */
+    if (h_ok && (s_state == MOTION_SEEK || s_state == MOTION_SETTLE)) {
+        int32_t old;
+        float vmax = fmaxf(speed_mm_s(MOTION_DIR_UP), speed_mm_s(MOTION_DIR_DOWN));
+        if (hist_at(now, PLAUS_WINDOW_MS, &old) &&
+            abs(h - old) > 1.5f * vmax * PLAUS_WINDOW_MS / 1000 + PLAUS_NOISE_MM) {
+            ESP_LOGW(TAG, "implausible height change %ld -> %ld mm in %d ms", (long)old, (long)h, PLAUS_WINDOW_MS);
+            enter_fault("Height jumped: something in the sensor beam?");
+        }
+    }
+
+    /* Invariant 6: stall check while driving JOG / SEEK with a calibrated sensor. */
+    if (h_ok && s_out != MOTION_DIR_NONE && (s_state == MOTION_JOG || s_state == MOTION_SEEK) &&
+        now - s_on_since_us >= (int64_t)STALL_AFTER_MS * 1000) {
+        int32_t old;
+        if (hist_at(now, STALL_WINDOW_MS, &old) && abs(h - old) < STALL_MIN_MM) {
+            bool at_end = (s_out == MOTION_DIR_UP && h >= s_max_mm + END_STOP_MARGIN_MM - END_ZONE_MM) ||
+                          (s_out == MOTION_DIR_DOWN && h <= s_min_mm - END_STOP_MARGIN_MM + END_ZONE_MM);
+            if (s_state == MOTION_JOG && at_end) {
+                /* Holding a jog into the end stop: the desk has simply arrived. */
+                motion_req_t r = { .type = MOTION_REQ_JOG_UP, .source = s_src };
+                reject(&r, s_out == MOTION_DIR_UP ? "At the top" : "At the bottom");
+                apply_output(MOTION_DIR_NONE, "end stop");
+                set_state(MOTION_IDLE, "end stop");
+            } else {
+                ESP_LOGW(TAG, "stall: %ld -> %ld mm in %d ms while driving %s", (long)old, (long)h, STALL_WINDOW_MS,
+                         dir_name(s_out));
+                enter_fault("Desk not moving (stall)");
+            }
+        }
+    }
+
     motion_dir_t want = MOTION_DIR_NONE;
     switch (s_state) {
     case MOTION_JOG:
@@ -579,21 +783,34 @@ static void step(uint32_t dt_ms)
         break;
     case MOTION_SEEK: {
         if (!h_ok) {
-            apply_output(MOTION_DIR_NONE, "height invalid");
-            set_state(MOTION_IDLE, "height invalid");
+            enter_fault("Height reading lost during a move");
             break;
         }
-        motion_dir_t d = s_target_mm > h ? MOTION_DIR_UP : MOTION_DIR_DOWN;
-        /* Simulator has no coast: release once the target is reached or crossed. */
-        bool reached = (s_out == MOTION_DIR_UP && h >= s_target_mm) ||
-                       (s_out == MOTION_DIR_DOWN && h <= s_target_mm) ||
-                       abs(s_target_mm - h) <= 1;
-        if (reached) {
-            apply_output(MOTION_DIR_NONE, "seek: release");
-            s_settle_until_us = now + SETTLE_US;
-            set_state(MOTION_SETTLE, "target reached");
-        } else {
-            want = d;
+        if (s_sk == SK_APPROACH) {
+            /* Release early by the coast distance (+ margin) so the desk coasts onto the target. */
+            int32_t remaining = s_sk_dir == MOTION_DIR_UP ? s_target_mm - h : h - s_target_mm;
+            if (remaining <= coast_mm(s_sk_dir) + CONFIG_DESK_SEEK_MARGIN_MM) {
+                s_sk_nudge_ms = s_out == s_sk_dir ? (uint32_t)((now - s_on_since_us) / 1000) : 0;  /* on-time, for learning */
+                apply_output(MOTION_DIR_NONE, "seek: release");
+                s_sk_release_h = h;
+                s_sk = SK_SETTLE1;
+                s_sk_t_us = now;
+                set_state(MOTION_SETTLE, "released");
+            } else {
+                want = s_sk_dir;
+            }
+        } else if (s_sk == SK_NUDGE) {
+            if (s_out == s_sk_dir && s_sk_t_us == 0) {
+                s_sk_t_us = now;   /* pulse length counts from when the output is really on */
+            }
+            if (s_sk_t_us && now - s_sk_t_us >= (int64_t)s_sk_nudge_ms * 1000) {
+                apply_output(MOTION_DIR_NONE, "seek: nudge done");
+                s_sk = SK_SETTLE2;
+                s_sk_t_us = now;
+                set_state(MOTION_SETTLE, "nudged");
+            } else {
+                want = s_sk_dir;
+            }
         }
         break;
     }
@@ -604,13 +821,44 @@ static void step(uint32_t dt_ms)
             set_state(MOTION_IDLE, "calibration ended");
         }
         break;
-    case MOTION_SETTLE:
-        if (now >= s_settle_until_us) {
-            ESP_LOGI(TAG, "seek done: %ld mm (target %ld, error %+ld)", (long)h, (long)s_target_mm,
-                     (long)(h - s_target_mm));
-            set_state(MOTION_IDLE, "settled");
+    case MOTION_SETTLE: {
+        if (!h_ok) {
+            enter_fault("Height reading lost during a move");
+            break;
         }
+        /* Steady: change < 2 mm over 500 ms (after release), or 2 s at most. */
+        int32_t span;
+        uint32_t since = (uint32_t)((now - s_sk_t_us) / 1000);
+        bool steady = since >= SETTLE_STEADY_MS && hist_span(now, SETTLE_STEADY_MS, &span) && span < SETTLE_MM;
+        if (!steady && since < SETTLE_MAX_MS) {
+            break;
+        }
+        int32_t err = s_target_mm - h;
+        if (s_sk == SK_SETTLE1) {
+#if !CONFIG_DESK_SIMULATOR
+            /* Learn from full-speed approaches only (short ones coast less). */
+            if (s_sk_nudge_ms >= 2000) {
+                int32_t moved = s_sk_dir == MOTION_DIR_UP ? h - s_sk_release_h : s_sk_release_h - h;
+                learn_coast(s_sk_dir, moved);
+            }
+#endif
+            if (abs(err) > CONFIG_DESK_SEEK_TOLERANCE_MM) {
+                /* One corrective nudge, sized from the error and speed. */
+                s_sk_dir = err > 0 ? MOTION_DIR_UP : MOTION_DIR_DOWN;
+                uint32_t ms = (uint32_t)(abs(err) / speed_mm_s(s_sk_dir) * 1000);
+                s_sk_nudge_ms = ms < NUDGE_MIN_MS ? NUDGE_MIN_MS : ms;
+                s_sk = SK_NUDGE;
+                s_sk_t_us = 0;
+                s_sk_corrected = true;
+                ESP_LOGI(TAG, "seek: %ld mm (error %+ld), nudge %s %lu ms", (long)h, (long)-err,
+                         s_sk_dir == MOTION_DIR_UP ? "up" : "down", (unsigned long)s_sk_nudge_ms);
+                set_state(MOTION_SEEK, "correction");
+                break;
+            }
+        }
+        seek_done(h);
         break;
+    }
     default:
         break;
     }
@@ -628,10 +876,16 @@ static void step(uint32_t dt_ms)
         apply_new = true;
     }
     if (apply_new) {
-        apply_calibration(&nc);
+        apply_calibration(&nc, true);
         if (s_cal_saved_cb) {
             s_cal_saved_cb(&nc);
         }
+    }
+    /* Persist learned coasts at most once an hour (flash wear). */
+    if (s_coast_dirty && s_learn_cb && !moving_state() && now - s_coast_saved_us >= LEARN_PERSIST_US) {
+        s_learn_cb(s_coast[0], s_coast[1]);
+        s_coast_dirty = false;
+        s_coast_saved_us = now;
     }
 
     motion_status_t st = {
@@ -641,6 +895,8 @@ static void step(uint32_t dt_ms)
         .height_valid = h_ok,
         .height_mm = h,
         .target_mm = (s_state == MOTION_SEEK || s_state == MOTION_SETTLE) ? s_target_mm : 0,
+        .coast_up_mm = coast_mm(MOTION_DIR_UP),
+        .coast_down_mm = coast_mm(MOTION_DIR_DOWN),
         .presets_available = s_calibrated && SEEKS_ENABLED,
         .calibrated = s_calibrated,
         .max_move_s = (uint32_t)(s_max_move_us / 1000000),
@@ -660,6 +916,11 @@ static void step(uint32_t dt_ms)
     st.cal = s_cal;
 #endif
     calib_get_status(&st.cal_session);
+    st.last_seek.seq = s_last_seek.seq;
+    st.last_seek.target_mm = s_last_seek.target_mm;
+    st.last_seek.final_mm = s_last_seek.final_mm;
+    st.last_seek.error_mm = s_last_seek.error_mm;
+    st.last_seek.corrected = s_last_seek.corrected;
     portENTER_CRITICAL(&s_lock);
     s_pub = st;
     portEXIT_CRITICAL(&s_lock);
