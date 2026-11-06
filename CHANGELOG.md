@@ -1,5 +1,33 @@
 # Changelog
 
+## Stage 4: Sensor calibration routine (0.4.0) — 2026-11-06
+
+- Calibration routine in `motion` (`calib.c`): budget check (waits and opens by itself when there is
+  enough), prompt, probe for the sign, top stop, 2 coast tests down, bottom stop, 2 coast tests up,
+  back to the bottom (repeatability check), tape-measure entry, summary, Save / Discard. Speeds by
+  least squares over the steady part of each run. Runs under all the invariants; long runs are cut
+  into ≤ 20 s segments. Order changed from the spec to fit the duty budget (see README).
+- Height model `h_min + sign × (reading − raw_min)`; calibrated range and max move time
+  (travel / slowest speed × 1.3) replace the uncalibrated defaults. Stored in NVS with a version and
+  timestamp. Presets stay off until stage 5.
+- Display: gear button → Settings (calibration status, Calibrate desk, Sensor details); calibration
+  screen with progress, keypad for the height, summary, result messages.
+- Web: calibration panel on the Control tab, Calibration card on System (start, export / import JSON).
+  `POST /api/cal`, `GET` / `PUT /api/calibration`; status JSON gains `calibrated`, `min_mm`, `max_mm`, `cal`.
+- Settings: presets are range-checked only when changed, so a new calibration doesn't block saving
+  other settings; the web form outlines out-of-range presets.
+- Console: `cal` command.
+- Addition to the spec: **Correct height** (display, web, `cal correct <mm>`): a second tape
+  measurement sets a sensor scale factor (or the offset near the bottom). Calibration record v2 adds
+  `scale` in what was padding, so v1 records load unchanged (scale 1). The VL53L0X here reads ~7 %
+  long; with scale 0.931 the display matches the tape within 1 mm at bottom, middle and top.
+- The duty ledger restarts its 20 min expiry after a reflash/reset (RTC time restarts and the
+  ledger keeps the recorded on-time, conservatively). Noted, unchanged.
+- Tested on the desk: full routine in 78 s; cancel by web STOP (step 2) and web Cancel (coast test):
+  output off within 1 ms, calibration unchanged; export / import round trip; bad imports rejected;
+  start refused while the display is locked. Josh: display flow, touch-to-cancel, Correct height and
+  a full run from the screen (end stops repeat within 1 mm of the first run).
+
 ## Stage 3: Sensor test with raw readings (0.3.0) — 2026-11-06
 
 - `vl53l0x`: register-level driver ported from Pololu's library (ST init sequence: SPAD setup, tuning

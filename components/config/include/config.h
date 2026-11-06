@@ -77,6 +77,12 @@ void config_add_listener(config_listener_t fn);
 bool config_admin_check(const char *password);
 esp_err_t config_admin_set(const char *password);   /* NULL or "" clears it */
 
+/* Other records in the settings namespace (e.g. the calibration). load fails
+ * with ESP_ERR_INVALID_SIZE if the stored size differs from `len`. Erased by a
+ * factory reset. */
+esp_err_t config_blob_load(const char *key, void *buf, size_t len);
+esp_err_t config_blob_save(const char *key, const void *buf, size_t len);
+
 /* Erases all settings (factory reset). Caller reboots afterwards. */
 esp_err_t config_factory_reset(void);
 

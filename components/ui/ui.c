@@ -6,6 +6,8 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -87,6 +89,16 @@ typedef struct {
 static lv_obj_t *s_scr_dbg, *s_dbg_big, *s_dbg_vals_l, *s_dbg_vals_r;
 static bool s_debug_from_lock;
 static lv_obj_t *s_lock_sensor, *s_ctrl_sensor;
+
+/* Settings + calibration screens */
+static lv_obj_t *s_scr_set, *s_set_info;
+static lv_obj_t *s_scr_cal, *s_cal_prev, *s_cal_title, *s_cal_text, *s_cal_prog, *s_cal_value, *s_cal_kb;
+static lv_obj_t *s_cal_b1, *s_cal_b1l, *s_cal_b2, *s_cal_b2l;
+static motion_cal_cmd_t s_cal_b1_cmd, s_cal_b2_cmd;
+static char s_cal_entry[6];
+static motion_cal_phase_t s_cal_shown = MOTION_CAL_NONE;
+static lv_obj_t *s_set_correct, *s_scr_num, *s_num_value;
+static char s_num_entry[6];
 
 static volatile bool s_locked = true;
 static net_status_t s_net;
@@ -341,6 +353,12 @@ static void lock_btn_cb(lv_event_t *e)
     show_lock();
 }
 
+static void settings_btn_cb(lv_event_t *e)
+{
+    lv_screen_load(s_scr_set);
+    s_last_touch_ms = now_ms();
+}
+
 static void fault_ack_cb(lv_event_t *e)
 {
     motion_req_t r = { .type = MOTION_REQ_CLEAR_FAULT, .source = MOTION_SRC_TOUCH };
@@ -446,7 +464,14 @@ static lv_obj_t *make_preset(lv_obj_t *parent, const char *name, motion_preset_t
 static void build_control(void)
 {
     s_scr_ctrl = make_screen();
-    make_status_row(s_scr_ctrl, &s_ctrl_row, 64);
+    make_status_row(s_scr_ctrl, &s_ctrl_row, 104);
+
+    lv_obj_t *gear = make_button(s_scr_ctrl, 34, 26, COL_PANEL);
+    lv_obj_set_style_radius(gear, 13, 0);
+    lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, -70, 2);
+    lv_obj_t *gl = make_label(gear, &lv_font_montserrat_14, COL_DIM, LV_SYMBOL_SETTINGS);
+    lv_obj_center(gl);
+    lv_obj_add_event_cb(gear, settings_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *lock = make_button(s_scr_ctrl, 56, 26, COL_PANEL);
     lv_obj_set_style_radius(lock, 13, 0);
@@ -559,6 +584,8 @@ static void render_sensor(void)
     } else if (!h.valid) {
         snprintf(line, sizeof(line), "sensor: no reading (%s)", vl53l0x_status_name(h.range_status));
         c = COL_SEEK;
+    } else if (s_have_last && s_last.calibrated) {
+        line[0] = 0;   /* the big number is the real height now */
     } else {
         snprintf(line, sizeof(line), "sensor %.0f mm (uncalibrated)", h.filtered_mm);
     }
@@ -602,6 +629,309 @@ static void render_sensor(void)
              h.budget_ms, h.ema_pct / 100.0f, (unsigned long)h.errors, (unsigned long)h.inits);
     lv_label_set_text(s_dbg_vals_l, l);
     lv_label_set_text(s_dbg_vals_r, r);
+}
+
+/* ---------------- settings / calibration ---------------- */
+
+static void set_back_cb(lv_event_t *e)
+{
+    lv_screen_load(s_scr_ctrl);
+    s_last_touch_ms = now_ms();
+}
+
+static void set_cal_cb(lv_event_t *e)
+{
+    motion_cal_cmd(MOTION_CAL_BEGIN, MOTION_SRC_TOUCH);
+}
+
+static void set_sensor_cb(lv_event_t *e)
+{
+    show_debug();
+}
+
+static lv_obj_t *make_text_button(lv_obj_t *parent, int w, int h, lv_color_t bg, const char *text, lv_obj_t **lbl)
+{
+    lv_obj_t *b = make_button(parent, w, h, bg);
+    lv_obj_t *l = make_label(b, &lv_font_montserrat_14, COL_TEXT, text);
+    lv_obj_center(l);
+    if (lbl) *lbl = l;
+    return b;
+}
+
+static void num_show(void)
+{
+    char v[24];
+    snprintf(v, sizeof(v), "%s mm", s_num_entry[0] ? s_num_entry : "____");
+    lv_label_set_text(s_num_value, v);
+}
+
+static void set_correct_cb(lv_event_t *e)
+{
+    s_num_entry[0] = 0;
+    num_show();
+    lv_screen_load(s_scr_num);
+    s_last_touch_ms = now_ms();
+}
+
+static void num_kb_cb(lv_event_t *e)
+{
+    lv_obj_t *kb = lv_event_get_target(e);
+    const char *txt = lv_buttonmatrix_get_button_text(kb, lv_buttonmatrix_get_selected_button(kb));
+    if (!txt) return;
+    size_t n = strlen(s_num_entry);
+    if (strcmp(txt, "OK") == 0 || strcmp(txt, "Cancel") == 0) {
+        if (txt[0] == 'O' && n) {
+            motion_req_t r = { .type = MOTION_REQ_CAL_CORRECT, .source = MOTION_SRC_TOUCH, .value = atoi(s_num_entry) };
+            motion_request(&r);
+            toast("Height corrected");
+        }
+        lv_screen_load(s_scr_set);
+        s_last_touch_ms = now_ms();
+        return;
+    } else if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
+        if (n) s_num_entry[n - 1] = 0;
+    } else if (n < 4 && txt[0] >= '0' && txt[0] <= '9') {
+        s_num_entry[n] = txt[0];
+        s_num_entry[n + 1] = 0;
+    }
+    num_show();
+}
+
+static lv_obj_t *make_keypad(lv_obj_t *parent, lv_event_cb_t cb)
+{
+    static const char *map[] = { "1", "2", "3", "4", "5", "6", "7", "\n",
+                                 "8", "9", "0", LV_SYMBOL_BACKSPACE, "Cancel", "OK", "" };
+    lv_obj_t *kb = lv_buttonmatrix_create(parent);
+    lv_buttonmatrix_set_map(kb, map);
+    lv_obj_set_size(kb, 308, 84);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_set_style_bg_opa(kb, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(kb, 0, 0);
+    lv_obj_set_style_pad_all(kb, 2, 0);
+    lv_obj_set_style_pad_gap(kb, 4, 0);
+    lv_obj_set_style_bg_color(kb, COL_PANEL, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(kb, COL_TEXT, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(kb, &lv_font_montserrat_14, LV_PART_ITEMS);
+    lv_obj_add_event_cb(kb, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return kb;
+}
+
+static void build_number_entry(void)
+{
+    s_scr_num = make_screen();
+    lv_obj_t *t = make_label(s_scr_num, &lv_font_montserrat_14, COL_TEXT,
+                             "Measure floor to desktop now and enter it. Higher up corrects the scale, at the bottom the offset.");
+    lv_obj_set_width(t, 300);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 10, 4);
+    s_num_value = make_label(s_scr_num, &lv_font_montserrat_28, COL_ACCENT, "");
+    lv_obj_align(s_num_value, LV_ALIGN_TOP_RIGHT, -10, 46);
+    make_keypad(s_scr_num, num_kb_cb);
+}
+
+static void build_settings(void)
+{
+    s_scr_set = make_screen();
+    lv_obj_t *t = make_label(s_scr_set, &lv_font_montserrat_20, COL_TEXT, "Settings");
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 10, 4);
+    lv_obj_t *back = make_text_button(s_scr_set, 56, 26, COL_PANEL, "Back", NULL);
+    lv_obj_set_style_radius(back, 13, 0);
+    lv_obj_align(back, LV_ALIGN_TOP_RIGHT, -8, 2);
+    lv_obj_add_event_cb(back, set_back_cb, LV_EVENT_CLICKED, NULL);
+
+    s_set_info = make_label(s_scr_set, &lv_font_montserrat_14, COL_DIM, "");
+    lv_obj_set_width(s_set_info, 300);
+    lv_label_set_long_mode(s_set_info, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_set_info, LV_ALIGN_TOP_LEFT, 10, 36);
+
+    lv_obj_t *cal = make_text_button(s_scr_set, 98, 46, COL_ACCENT, "Calibrate", NULL);
+    lv_obj_align(cal, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+    lv_obj_add_event_cb(cal, set_cal_cb, LV_EVENT_CLICKED, NULL);
+    s_set_correct = make_text_button(s_scr_set, 98, 46, COL_PANEL, "Correct\nheight", NULL);
+    lv_obj_align(s_set_correct, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_event_cb(s_set_correct, set_correct_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *sen = make_text_button(s_scr_set, 98, 46, COL_PANEL, "Sensor", NULL);
+    lv_obj_align(sen, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_obj_add_event_cb(sen, set_sensor_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void render_settings_info(const motion_status_t *st)
+{
+    char t[200];
+    if (st->calibrated) {
+        float k = st->cal.scale;
+        int32_t h_max = (int32_t)lroundf(st->cal.h_min_mm + k * st->cal.sign * (st->cal.raw_max - st->cal.raw_min));
+        char when[24] = "";
+        if (st->cal.timestamp) {
+            time_t ts = (time_t)st->cal.timestamp;
+            struct tm tm;
+            localtime_r(&ts, &tm);
+            strftime(when, sizeof(when), " on %Y-%m-%d", &tm);
+        }
+        snprintf(t, sizeof(t), "Calibrated%s: %ld-%ld mm.\nSpeed up %.1f / down %.1f mm/s, coast up %.0f / down %.0f mm.",
+                 when, (long)st->cal.h_min_mm, (long)h_max, k * st->cal.speed_up, k * st->cal.speed_down,
+                 k * st->cal.coast_up, k * st->cal.coast_down);
+    } else {
+        snprintf(t, sizeof(t), "Not calibrated. Calibration finds the end stops and maps the sensor to desk height "
+                               "(needs about %u s of motor time).", (unsigned)st->cal_session.need_s);
+    }
+    lv_label_set_text(s_set_info, t);
+    lv_obj_set_state(s_set_correct, LV_STATE_DISABLED, !st->calibrated);
+}
+
+static void cal_btn_cb(lv_event_t *e)
+{
+    const motion_cal_cmd_t *cmd = lv_event_get_user_data(e);
+    motion_cal_cmd(*cmd, MOTION_SRC_TOUCH);
+}
+
+static void cal_entry_show(void)
+{
+    char v[24];
+    snprintf(v, sizeof(v), "%s mm", s_cal_entry[0] ? s_cal_entry : "____");
+    lv_label_set_text(s_cal_value, v);
+}
+
+static void cal_kb_cb(lv_event_t *e)
+{
+    lv_obj_t *kb = lv_event_get_target(e);
+    const char *txt = lv_buttonmatrix_get_button_text(kb, lv_buttonmatrix_get_selected_button(kb));
+    if (!txt) return;
+    size_t n = strlen(s_cal_entry);
+    if (strcmp(txt, "OK") == 0) {
+        if (n) {
+            motion_req_t r = { .type = MOTION_REQ_CAL_HEIGHT, .source = MOTION_SRC_TOUCH, .value = atoi(s_cal_entry) };
+            motion_request(&r);
+        }
+    } else if (strcmp(txt, "Cancel") == 0) {
+        motion_cal_cmd(MOTION_CAL_DISCARD, MOTION_SRC_TOUCH);
+    } else if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
+        if (n) s_cal_entry[n - 1] = 0;
+    } else if (n < 4 && txt[0] >= '0' && txt[0] <= '9') {
+        s_cal_entry[n] = txt[0];
+        s_cal_entry[n + 1] = 0;
+    }
+    cal_entry_show();
+}
+
+static void build_calibration(void)
+{
+    s_scr_cal = make_screen();
+    s_cal_title = make_label(s_scr_cal, &lv_font_montserrat_20, COL_TEXT, "Calibration");
+    lv_obj_align(s_cal_title, LV_ALIGN_TOP_LEFT, 10, 4);
+    s_cal_text = make_label(s_scr_cal, &lv_font_montserrat_14, COL_TEXT, "");
+    lv_obj_set_width(s_cal_text, 300);
+    lv_label_set_long_mode(s_cal_text, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_cal_text, LV_ALIGN_TOP_LEFT, 10, 32);
+    s_cal_prog = make_label(s_scr_cal, &lv_font_montserrat_14, COL_DIM, "");
+    lv_obj_align(s_cal_prog, LV_ALIGN_TOP_LEFT, 10, 96);
+    s_cal_value = make_label(s_scr_cal, &lv_font_montserrat_28, COL_ACCENT, "");
+    lv_obj_align(s_cal_value, LV_ALIGN_TOP_RIGHT, -10, 4);
+
+    s_cal_kb = make_keypad(s_scr_cal, cal_kb_cb);
+
+    s_cal_b1 = make_text_button(s_scr_cal, 146, 46, COL_ACCENT, "", &s_cal_b1l);
+    lv_obj_align(s_cal_b1, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+    lv_obj_add_event_cb(s_cal_b1, cal_btn_cb, LV_EVENT_CLICKED, (void *)&s_cal_b1_cmd);
+    s_cal_b2 = make_text_button(s_scr_cal, 146, 46, COL_PANEL, "", &s_cal_b2l);
+    lv_obj_align(s_cal_b2, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_obj_add_event_cb(s_cal_b2, cal_btn_cb, LV_EVENT_CLICKED, (void *)&s_cal_b2_cmd);
+}
+
+static void cal_buttons(const char *b1, motion_cal_cmd_t c1, const char *b2, motion_cal_cmd_t c2)
+{
+    s_cal_b1_cmd = c1;
+    s_cal_b2_cmd = c2;
+    lv_obj_set_flag(s_cal_b1, LV_OBJ_FLAG_HIDDEN, b1 == NULL);
+    lv_obj_set_flag(s_cal_b2, LV_OBJ_FLAG_HIDDEN, b2 == NULL);
+    if (b1) lv_label_set_text(s_cal_b1l, b1);
+    if (b2) lv_label_set_text(s_cal_b2l, b2);
+}
+
+static void render_calibration(const motion_status_t *st)
+{
+    const motion_cal_status_t *c = &st->cal_session;
+    lv_obj_t *cur = lv_screen_active();
+    if (c->phase == MOTION_CAL_NONE) {
+        if (cur == s_scr_cal) {
+            lv_screen_load(s_cal_prev ? s_cal_prev : s_scr_ctrl);
+            s_last_touch_ms = now_ms();
+        }
+        s_cal_shown = MOTION_CAL_NONE;
+        return;
+    }
+    if (cur != s_scr_cal) {
+        s_cal_prev = cur == s_scr_lock ? s_scr_lock : cur == s_scr_set ? s_scr_set : s_scr_ctrl;
+        set_dimmed(false);
+        lv_screen_load(s_scr_cal);
+    }
+    if (c->phase != s_cal_shown && c->phase == MOTION_CAL_ENTER_HEIGHT) {
+        s_cal_entry[0] = 0;
+    }
+    s_cal_shown = c->phase;
+
+    char text[200] = "", prog[64] = "";
+    const char *title = "Calibration";
+    lv_color_t tc = COL_TEXT;
+    bool entry = c->phase == MOTION_CAL_ENTER_HEIGHT;
+    lv_obj_set_flag(s_cal_kb, LV_OBJ_FLAG_HIDDEN, !entry);
+    lv_obj_set_flag(s_cal_value, LV_OBJ_FLAG_HIDDEN, !entry);
+
+    switch (c->phase) {
+    case MOTION_CAL_NEED_BUDGET:
+        snprintf(text, sizeof(text), "%s", c->text);
+        snprintf(prog, sizeof(prog), "Ready in %lu:%02lu", (unsigned long)(c->wait_s / 60), (unsigned long)(c->wait_s % 60));
+        cal_buttons(NULL, 0, "Close", MOTION_CAL_CLOSE);
+        break;
+    case MOTION_CAL_PROMPT:
+        snprintf(text, sizeof(text), "%s\nThe desk will move to the top and bottom on its own. Touch anywhere to stop it.", c->text);
+        cal_buttons("Start", MOTION_CAL_START, "Cancel", MOTION_CAL_CANCEL);
+        break;
+    case MOTION_CAL_RUNNING:
+        title = "Calibrating";
+        tc = COL_SEEK;
+        snprintf(text, sizeof(text), "%s\nTouch anywhere to stop.", c->text);
+        snprintf(prog, sizeof(prog), "Step %u of %u  |  %lu:%02lu", c->step, c->steps,
+                 (unsigned long)(c->elapsed_s / 60), (unsigned long)(c->elapsed_s % 60));
+        cal_buttons(NULL, 0, "Cancel", MOTION_CAL_CANCEL);
+        break;
+    case MOTION_CAL_ENTER_HEIGHT:
+        snprintf(text, sizeof(text), "Desk is at its lowest. Measure floor to desktop and enter it:");
+        cal_buttons(NULL, 0, NULL, 0);
+        cal_entry_show();
+        break;
+    case MOTION_CAL_SUMMARY: {
+        const motion_cal_t *r = &c->result;
+        float k = r->scale > 0 ? r->scale : 1;
+        float travel = k * r->sign * (r->raw_max - r->raw_min);
+        snprintf(text, sizeof(text), "%s (%.0f mm of travel)\nSpeed up %.1f / down %.1f mm/s\nCoast up %.0f / down %.0f mm",
+                 c->text, travel, k * r->speed_up, k * r->speed_down, k * r->coast_up, k * r->coast_down);
+        cal_buttons("Save", MOTION_CAL_SAVE, "Discard", MOTION_CAL_DISCARD);
+        break;
+    }
+    case MOTION_CAL_SAVED:
+        title = "Calibrated";
+        snprintf(text, sizeof(text), "%s", c->text);
+        cal_buttons(NULL, 0, "OK", MOTION_CAL_CLOSE);
+        break;
+    case MOTION_CAL_FAILED:
+        title = "Calibration failed";
+        tc = COL_FAULT;
+        snprintf(text, sizeof(text), "%s\nThe old calibration is kept.", c->text);
+        cal_buttons(NULL, 0, "OK", MOTION_CAL_CLOSE);
+        break;
+    case MOTION_CAL_CANCELLED:
+        title = "Cancelled";
+        snprintf(text, sizeof(text), "%s", c->text);
+        cal_buttons(NULL, 0, "OK", MOTION_CAL_CLOSE);
+        break;
+    default:
+        break;
+    }
+    lv_label_set_text(s_cal_title, title);
+    lv_obj_set_style_text_color(s_cal_title, tc, 0);
+    lv_label_set_text(s_cal_text, text);
+    lv_label_set_text(s_cal_prog, prog);
 }
 
 static lv_obj_t *make_overlay(lv_color_t accent)
@@ -696,6 +1026,8 @@ static void render_status(const motion_status_t *st)
 
     update_row(&s_lock_row, st);
     update_row(&s_ctrl_row, st);
+    render_settings_info(st);
+    render_calibration(st);
 
     /* Preset labels and availability */
     char pl[40];
@@ -792,7 +1124,8 @@ static void status_timer_cb(lv_timer_t *t)
     }
     bool moving = st.state == MOTION_JOG || st.state == MOTION_SEEK || st.state == MOTION_SETTLE ||
                   st.state == MOTION_CALIBRATING;
-    if (lv_screen_active() == s_scr_ctrl && !moving && now - s_last_touch_ms > s_cfg.autolock_ms) {
+    if ((lv_screen_active() == s_scr_ctrl || lv_screen_active() == s_scr_set || lv_screen_active() == s_scr_num) && !moving &&
+        now - s_last_touch_ms > s_cfg.autolock_ms) {
         show_lock();
     }
     if (lv_screen_active() == s_scr_dbg && !moving &&
@@ -900,6 +1233,9 @@ esp_err_t ui_init(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel, es
     build_lock();
     build_control();
     build_debug();
+    build_settings();
+    build_number_entry();
+    build_calibration();
     build_overlays();
     lv_screen_load(s_scr_lock);
     s_locked_at_ms = s_last_touch_ms = now_ms();

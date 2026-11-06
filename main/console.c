@@ -81,6 +81,51 @@ static int cmd_sensor(int argc, char **argv)
     return 0;
 }
 
+static int cmd_cal(int argc, char **argv)
+{
+    static const char *phases[] = { "none", "need_budget", "prompt", "running", "enter_height", "summary",
+                                    "saved", "failed", "cancelled" };
+    if (argc >= 2) {
+        static const char *cmds[] = { "begin", "start", "cancel", "save", "discard", "close" };
+        for (int i = 0; i < 6; i++) {
+            if (strcmp(argv[1], cmds[i]) == 0) {
+                motion_cal_cmd((motion_cal_cmd_t)i, MOTION_SRC_SYSTEM);
+                return 0;
+            }
+        }
+        if (strcmp(argv[1], "correct") == 0 && argc == 3) {
+            motion_req_t r = { .type = MOTION_REQ_CAL_CORRECT, .source = MOTION_SRC_SYSTEM, .value = atoi(argv[2]) };
+            motion_request(&r);
+            return 0;
+        }
+        if (strcmp(argv[1], "height") == 0 && argc == 3) {
+            motion_req_t r = { .type = MOTION_REQ_CAL_HEIGHT, .source = MOTION_SRC_SYSTEM, .value = atoi(argv[2]) };
+            motion_request(&r);
+            return 0;
+        }
+        if (strcmp(argv[1], "show") != 0) {
+            printf("usage: cal [show|begin|start|cancel|height <mm>|save|discard|close|correct <mm>]\n");
+            return 1;
+        }
+    }
+    motion_status_t s;
+    motion_get_status(&s);
+    const motion_cal_status_t *c = &s.cal_session;
+    const motion_cal_t *r = &c->result;
+    printf("session: %s step %u/%u elapsed %lus wait %lus text='%s'\n", phases[c->phase], c->step, c->steps,
+           (unsigned long)c->elapsed_s, (unsigned long)c->wait_s, c->text);
+    printf("  measured: sign %+d raw %.1f..%.1f speed up %.1f down %.1f coast up %.1f down %.1f h_min %ld\n",
+           r->sign, r->raw_min, r->raw_max, r->speed_up, r->speed_down, r->coast_up, r->coast_down, (long)r->h_min_mm);
+    if (s.calibrated) {
+        printf("active: %ld..%ld mm usable, max move %lus, scale %.4f, raw %.1f..%.1f sign %+d, speed %.1f/%.1f, coast %.1f/%.1f (sensor mm)\n",
+               (long)s.min_mm, (long)s.max_mm, (unsigned long)s.max_move_s, s.cal.scale, s.cal.raw_min, s.cal.raw_max, s.cal.sign,
+               s.cal.speed_up, s.cal.speed_down, s.cal.coast_up, s.cal.coast_down);
+    } else {
+        printf("active: not calibrated\n");
+    }
+    return 0;
+}
+
 static int cmd_scan(int argc, char **argv)
 {
     board_i2c_scan();
@@ -130,6 +175,7 @@ void console_start(void)
         { .command = "stop", .help = "Stop any movement", .func = cmd_stop },
         { .command = "goto", .help = "Seek to height: goto <mm>", .func = cmd_goto },
         { .command = "sensor", .help = "Show height sensor readings", .func = cmd_sensor },
+        { .command = "cal", .help = "Calibration: cal [show|begin|start|cancel|height <mm>|save|discard|close]", .func = cmd_cal },
         { .command = "scan", .help = "Scan the I2C bus", .func = cmd_scan },
         { .command = "time", .help = "Show clock and NTP server status", .func = cmd_time },
 #if CONFIG_DESK_DEBUG_COMMANDS

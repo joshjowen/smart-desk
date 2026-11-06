@@ -94,6 +94,14 @@ menu "Desk motion"
         help
             Shorten (with the window) to test the cooldown path.
 
+    config DESK_CAL_MOTOR_S
+        int "Motor time the calibration routine needs (s)"
+        range 30 115
+        default 90
+        help
+            Calibration only starts with at least this much duty budget left.
+            Worst case on a desk with ~31 s full travel is ~75 s.
+
     config DESK_DEBUG_COMMANDS
         bool "Debug console commands (fault/duty injection, crash)"
         default y

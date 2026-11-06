@@ -50,6 +50,15 @@ static void on_config_changed(const desk_config_t *c)
     height_set_params(c->sensor_profile, c->sensor_ema_pct);
 }
 
+static void on_cal_saved(const motion_cal_t *c)
+{
+    esp_err_t e = config_blob_save("cal", c, sizeof(*c));
+    int32_t lo, hi;
+    motion_get_range(&lo, &hi);
+    config_set_height_range(lo, hi);
+    ESP_LOGI(TAG, "calibration stored (%s), height range now %ld-%ld mm", esp_err_to_name(e), (long)lo, (long)hi);
+}
+
 static void mark_valid_cb(void *arg)
 {
     const esp_partition_t *run = esp_ota_get_running_partition();
@@ -79,6 +88,18 @@ void app_main(void)
              reset_reason_str(esp_reset_reason()));
 
     ESP_ERROR_CHECK(config_init());
+    motion_cal_t cal;
+    if (config_blob_load("cal", &cal, sizeof(cal)) == ESP_OK) {
+        const char *bad = motion_cal_check(&cal);
+        if (bad) {
+            ESP_LOGW(TAG, "stored calibration ignored: %s", bad);
+        } else {
+            motion_load_calibration(&cal);
+        }
+    } else {
+        ESP_LOGW(TAG, "not calibrated");
+    }
+    motion_set_cal_saved_cb(on_cal_saved);
     ESP_ERROR_CHECK(motion_init());
 
     desk_config_t cfg;

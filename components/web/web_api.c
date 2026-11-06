@@ -9,6 +9,10 @@
  *   POST /api/reboot  /api/factory-reset  /api/ota (raw .bin body)
  *   GET  /api/sensor?since=<seq>     sensor stats + samples since seq (open)
  *   GET  /api/sensor.csv             last 60 s of samples (open)
+ *   POST /api/cal                    {cmd: begin|start|cancel|height|save|discard|close|correct, mm}
+ *                                    (correct = tape-measured height now: fixes scale, or offset near the bottom)
+ *                                    (cancel / close open; begin / start need the display unlocked)
+ *   GET  /api/calibration  PUT /api/calibration   export / import the calibration as JSON
  * Everything except status, sensor and login needs the admin token once a password is set.
  */
 #include <math.h>
@@ -25,6 +29,8 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "config.h"
 #include "motion.h"
 #include "net.h"
@@ -161,6 +167,162 @@ static void schedule_restart(bool factory)
     esp_timer_start_once(s_restart_timer, 800 * 1000);
 }
 
+/* ---------------- calibration ---------------- */
+
+static const char *cal_phase_names[] = { "none", "need_budget", "prompt", "running", "enter_height", "summary",
+                                         "saved", "failed", "cancelled" };
+
+static cJSON *cal_json(const motion_cal_t *c)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "version", c->version);
+    cJSON_AddNumberToObject(o, "sign", c->sign);
+    cJSON_AddNumberToObject(o, "raw_min_mm", round((double)c->raw_min * 10) / 10);
+    cJSON_AddNumberToObject(o, "raw_max_mm", round((double)c->raw_max * 10) / 10);
+    cJSON_AddNumberToObject(o, "h_min_mm", c->h_min_mm);
+    double k = c->scale > 0 ? c->scale : 1.0;
+    cJSON_AddNumberToObject(o, "scale", round(k * 10000) / 10000);
+    cJSON_AddNumberToObject(o, "h_max_mm", lround(c->h_min_mm + k * c->sign * (c->raw_max - c->raw_min)));
+    cJSON_AddNumberToObject(o, "speed_up_mm_s", round((double)c->speed_up * 100) / 100);
+    cJSON_AddNumberToObject(o, "speed_down_mm_s", round((double)c->speed_down * 100) / 100);
+    cJSON_AddNumberToObject(o, "coast_up_mm", round((double)c->coast_up * 10) / 10);
+    cJSON_AddNumberToObject(o, "coast_down_mm", round((double)c->coast_down * 10) / 10);
+    cJSON_AddNumberToObject(o, "timestamp", (double)c->timestamp);
+    return o;
+}
+
+static cJSON *cal_session_json(const motion_cal_status_t *c)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "phase", cal_phase_names[c->phase]);
+    cJSON_AddNumberToObject(o, "step", c->step);
+    cJSON_AddNumberToObject(o, "steps", c->steps);
+    cJSON_AddStringToObject(o, "text", c->text);
+    cJSON_AddNumberToObject(o, "wait_s", c->wait_s);
+    cJSON_AddNumberToObject(o, "need_s", c->need_s);
+    cJSON_AddNumberToObject(o, "elapsed_s", c->elapsed_s);
+    if (c->phase == MOTION_CAL_SUMMARY) {
+        cJSON_AddItemToObject(o, "result", cal_json(&c->result));
+    }
+    return o;
+}
+
+/* Sends a motion request and waits briefly to see whether motion rejected it. */
+static esp_err_t send_motion(httpd_req_t *req, const motion_req_t *r)
+{
+    motion_status_t st;
+    motion_get_status(&st);
+    uint32_t seq = st.last_error_seq;
+    if (motion_request(r) != ESP_OK) {
+        return web_send_error(req, 409, "Desk busy, try again");
+    }
+    for (int i = 0; i < 8; i++) {
+        vTaskDelay(pdMS_TO_TICKS(25));
+        motion_get_status(&st);
+        if (st.last_error_seq != seq) {
+            return web_send_error(req, 409, st.last_error);
+        }
+    }
+    return send_ok(req);
+}
+
+static esp_err_t cal_post(httpd_req_t *req)
+{
+    cJSON *o = read_json(req);
+    if (!o) {
+        return ESP_OK;
+    }
+    const cJSON *cmd = cJSON_GetObjectItem(o, "cmd");
+    const cJSON *mm = cJSON_GetObjectItem(o, "mm");
+    char c[16] = "";
+    if (cJSON_IsString(cmd)) {
+        strlcpy(c, cmd->valuestring, sizeof(c));
+    }
+    int32_t mmv = cJSON_IsNumber(mm) ? (int32_t)mm->valuedouble : -1;
+    cJSON_Delete(o);
+
+    motion_req_t r = { .type = MOTION_REQ_CALIBRATE, .source = MOTION_SRC_WEB };
+    if (strcmp(c, "cancel") == 0 || strcmp(c, "close") == 0) {
+        r.value = c[0] == 'c' && c[1] == 'a' ? MOTION_CAL_CANCEL : MOTION_CAL_CLOSE;   /* always allowed */
+        return send_motion(req, &r);
+    }
+    REQUIRE_AUTH(req);
+    if (strcmp(c, "begin") == 0 || strcmp(c, "start") == 0) {
+        if (ui_is_locked()) {
+            return web_send_error(req, 409, "Unlock the desk display first: calibration moves the desk on its own.");
+        }
+        r.value = c[0] == 'b' ? MOTION_CAL_BEGIN : MOTION_CAL_START;
+    } else if (strcmp(c, "save") == 0) {
+        r.value = MOTION_CAL_SAVE;
+    } else if (strcmp(c, "discard") == 0) {
+        r.value = MOTION_CAL_DISCARD;
+    } else if (strcmp(c, "correct") == 0) {
+        r.type = MOTION_REQ_CAL_CORRECT;
+        r.value = mmv;
+    } else if (strcmp(c, "height") == 0) {
+        r.type = MOTION_REQ_CAL_HEIGHT;
+        r.value = mmv;
+    } else {
+        return web_send_error(req, 400, "Unknown command");
+    }
+    return send_motion(req, &r);
+}
+
+static esp_err_t calibration_get(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    motion_status_t st;
+    motion_get_status(&st);
+    if (!st.calibrated) {
+        return web_send_error(req, 404, "Not calibrated");
+    }
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"desk-calibration.json\"");
+    return web_send_json(req, 200, cal_json(&st.cal));
+}
+
+static bool num_field(const cJSON *o, const char *k, double *v)
+{
+    const cJSON *x = cJSON_GetObjectItem(o, k);
+    if (!cJSON_IsNumber(x)) return false;
+    *v = x->valuedouble;
+    return true;
+}
+
+static esp_err_t calibration_put(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *o = read_json(req);
+    if (!o) {
+        return ESP_OK;
+    }
+    double ver, sign, rmin, rmax, hmin, su, sd, cu, cd, ts = 0, scale = 1;
+    bool ok = num_field(o, "version", &ver) && num_field(o, "sign", &sign) && num_field(o, "raw_min_mm", &rmin) &&
+              num_field(o, "raw_max_mm", &rmax) && num_field(o, "h_min_mm", &hmin) &&
+              num_field(o, "speed_up_mm_s", &su) && num_field(o, "speed_down_mm_s", &sd) &&
+              num_field(o, "coast_up_mm", &cu) && num_field(o, "coast_down_mm", &cd);
+    num_field(o, "timestamp", &ts);
+    num_field(o, "scale", &scale);
+    cJSON_Delete(o);
+    if (!ok) {
+        return web_send_error(req, 400, "Missing or non-numeric calibration fields");
+    }
+    motion_cal_t c = {
+        .version = (uint32_t)ver, .valid = true, .sign = (int8_t)sign, .raw_min = rmin, .raw_max = rmax,
+        .h_min_mm = (int32_t)lround(hmin), .speed_up = su, .speed_down = sd, .coast_up = cu, .coast_down = cd,
+        .scale = scale,
+        .timestamp = (int64_t)ts,
+    };
+    const char *bad = motion_cal_check(&c);
+    if (bad) {
+        return web_send_error(req, 400, bad);
+    }
+    if (motion_set_calibration(&c) != ESP_OK) {
+        return web_send_error(req, 409, "Desk is moving or calibrating: try again when it is idle");
+    }
+    ESP_LOGI(TAG, "calibration imported");
+    return send_ok(req);
+}
+
 /* ---------------- status ---------------- */
 
 cJSON *web_status_json(void)
@@ -192,6 +354,10 @@ cJSON *web_status_json(void)
     cJSON_AddStringToObject(o, "last_error", st.last_error);
     cJSON_AddNumberToObject(o, "last_error_seq", st.last_error_seq);
     cJSON_AddStringToObject(o, "units", c.units_cm ? "cm" : "mm");
+    cJSON_AddBoolToObject(o, "calibrated", st.calibrated);
+    cJSON_AddNumberToObject(o, "min_mm", st.min_mm);
+    cJSON_AddNumberToObject(o, "max_mm", st.max_mm);
+    cJSON_AddItemToObject(o, "cal", cal_session_json(&st.cal_session));
     height_status_t h;
     height_get(&h);
     cJSON *sn = cJSON_AddObjectToObject(o, "sensor");
@@ -318,6 +484,9 @@ static cJSON *config_json(const desk_config_t *c)
     cJSON *lim = cJSON_AddObjectToObject(o, "limits");
     cJSON_AddNumberToObject(lim, "min_mm", lo);
     cJSON_AddNumberToObject(lim, "max_mm", hi);
+    motion_status_t mst;
+    motion_get_status(&mst);
+    cJSON_AddBoolToObject(lim, "calibrated", mst.calibrated);
     return o;
 }
 
@@ -776,6 +945,9 @@ esp_err_t web_api_register(httpd_handle_t h)
         { .uri = "/api/status", .method = HTTP_GET, .handler = status_get },
         { .uri = "/api/sensor", .method = HTTP_GET, .handler = sensor_get },
         { .uri = "/api/sensor.csv", .method = HTTP_GET, .handler = sensor_csv_get },
+        { .uri = "/api/cal", .method = HTTP_POST, .handler = cal_post },
+        { .uri = "/api/calibration", .method = HTTP_GET, .handler = calibration_get },
+        { .uri = "/api/calibration", .method = HTTP_PUT, .handler = calibration_put },
         { .uri = "/api/login", .method = HTTP_POST, .handler = login_post },
         { .uri = "/api/password", .method = HTTP_POST, .handler = password_post },
         { .uri = "/api/config", .method = HTTP_GET, .handler = config_get_h },

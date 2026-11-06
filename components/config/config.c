@@ -149,7 +149,7 @@ static bool valid_hostname(const char *h)
 
 #define FAIL(...) do { snprintf(err, err_len, __VA_ARGS__); return false; } while (0)
 
-static bool validate(const desk_config_t *c, char *err, size_t err_len)
+static bool validate(const desk_config_t *c, const desk_config_t *cur, char *err, size_t err_len)
 {
     size_t pl = strnlen(c->wifi_pass, sizeof(c->wifi_pass));
     if (strnlen(c->wifi_ssid, sizeof(c->wifi_ssid)) > 32) FAIL("Wi-Fi SSID: at most 32 characters");
@@ -159,7 +159,10 @@ static bool validate(const desk_config_t *c, char *err, size_t err_len)
         const cfg_preset_t *p = &c->presets[i];
         if (strnlen(p->name, sizeof(p->name)) == 0 || strnlen(p->name, sizeof(p->name)) > 15)
             FAIL("Preset %d name: 1-15 characters", i + 1);
-        if (p->enabled && (p->mm < s_min_mm || p->mm > s_max_mm))
+        /* Range-check only presets being changed: a new calibration can leave an
+         * old preset outside the range, and that mustn't block other settings. */
+        bool unchanged = cur && cur->presets[i].enabled == p->enabled && cur->presets[i].mm == p->mm;
+        if (p->enabled && !unchanged && (p->mm < s_min_mm || p->mm > s_max_mm))
             FAIL("Preset '%s': height must be %ld-%ld mm", p->name, (long)s_min_mm, (long)s_max_mm);
     }
     if (c->autolock_s < CFG_AUTOLOCK_MIN || c->autolock_s > CFG_AUTOLOCK_MAX)
@@ -181,7 +184,9 @@ static bool validate(const desk_config_t *c, char *err, size_t err_len)
 
 esp_err_t config_update(const desk_config_t *next, char *err, size_t err_len)
 {
-    if (!validate(next, err, err_len)) {
+    desk_config_t cur;
+    config_get(&cur);
+    if (!validate(next, &cur, err, err_len)) {
         ESP_LOGW(TAG, "rejected settings: %s", err);
         return ESP_ERR_INVALID_ARG;
     }
@@ -241,6 +246,39 @@ esp_err_t config_admin_set(const char *password)
     c.admin_prompt_dismissed = true;
     char err[64];
     return config_update(&c, err, sizeof(err));
+}
+
+esp_err_t config_blob_load(const char *key, void *buf, size_t len)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    size_t got = 0;
+    err = nvs_get_blob(h, key, NULL, &got);
+    if (err == ESP_OK && got != len) {
+        err = ESP_ERR_INVALID_SIZE;
+    } else if (err == ESP_OK) {
+        err = nvs_get_blob(h, key, buf, &got);
+    }
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t config_blob_save(const char *key, const void *buf, size_t len)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(h, key, buf, len);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
 }
 
 esp_err_t config_factory_reset(void)

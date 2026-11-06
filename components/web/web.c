@@ -258,7 +258,7 @@ static void push_timer_cb(void *arg)
 esp_err_t web_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 24;
     cfg.max_open_sockets = 10;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 8192;

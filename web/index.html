@@ -60,6 +60,9 @@ progress{width:100%}
 .sens small{font-size:18px;color:var(--dim);font-weight:500;margin-left:4px}
 #plot{width:100%;height:200px;display:block}
 .legend{display:flex;gap:16px;font-size:13px;color:var(--dim);margin-top:6px}
+#calPanel{border:2px solid var(--accent)}#calPanel.run{border-color:var(--warn)}#calPanel.bad{border-color:var(--bad)}
+#calPanel h3{margin:0 0 8px}#calProg{color:var(--dim);font-size:14px;margin-top:6px}
+input.bad{border-color:var(--bad)}
 .legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:6px}
 </style>
 </head>
@@ -69,6 +72,9 @@ progress{width:100%}
 <main>
 
 <section id="control" class="on">
+  <div id="calPanel" class="card" hidden><h3 id="calTitle">Calibration</h3><div id="calText"></div><div id="calProg"></div>
+    <div id="calEntry" class="row" hidden style="margin-top:12px"><input id="calMm" type="number" min="300" max="1500" placeholder="height in mm" inputmode="numeric"><button class="primary" id="calMmOk" style="flex:0">OK</button></div>
+    <div class="actions" id="calBtns"></div></div>
   <div id="faultBanner" class="banner bad" hidden></div>
   <div id="coolBanner" class="banner warn" hidden></div>
   <div id="lockBanner" class="banner warn" hidden></div>
@@ -80,7 +86,7 @@ progress{width:100%}
     <div class="jog"><button id="up" aria-label="Up">▲</button><button id="down" aria-label="Down">▼</button></div>
     <p class="hint">Hold to move. Releasing stops the desk.</p>
     <div class="presets" id="presetBtns"></div>
-    <p class="hint" id="presetHint" hidden>Presets need the height sensor and calibration (coming in a later stage).</p>
+    <p class="hint" id="presetHint" hidden></p>
     <button class="stop" id="stop">STOP</button>
   </div>
 </section>
@@ -148,6 +154,13 @@ progress{width:100%}
 
 <section id="system">
   <div class="card"><h2>Device</h2><dl id="sysInfo"></dl></div>
+  <div class="card"><h2>Calibration</h2><p id="calInfo" class="hint"></p>
+    <div class="actions"><button class="primary" id="calGo">Calibrate</button><button id="calExport">Export JSON</button><button id="calImportBtn">Import JSON</button><input type="file" id="calImport" accept=".json,application/json" hidden></div>
+    <label for="calFix">Correct height: tape-measure the desk where it is now and enter it (mm)</label>
+    <div class="row"><input id="calFix" type="number" min="300" max="1500" inputmode="numeric"><button id="calFixGo" style="flex:0">Correct</button></div>
+    <p class="hint">Up high it corrects the sensor's scale, at the bottom the offset. Use it after a calibration to bring the top within a few mm.</p>
+    <p class="hint">The routine runs the desk to both end stops (about 80 s of motor time) and asks for one tape-measure reading at the bottom. Needs the desk display unlocked.</p>
+  </div>
   <div class="card"><h2>Firmware update</h2>
     <input type="file" id="otaFile" accept=".bin">
     <progress id="otaProg" value="0" max="100" hidden></progress>
@@ -246,7 +259,8 @@ function render(s) {
   else if (s.state !== 'idle') sub.textContent = s.state;
   else if (!s.sensor) sub.textContent = '';
   else if (!s.sensor.online) { sub.textContent = 'sensor offline'; sub.classList.add('seek'); }
-  else sub.textContent = s.sensor.valid ? 'sensor ' + s.sensor.mm + ' mm (uncalibrated)' : 'sensor: no reading';
+  else if (s.calibrated) sub.textContent = '';
+  else sub.textContent = s.sensor.valid ? 'sensor ' + s.sensor.mm + ' mm (not calibrated)' : 'sensor: no reading';
   $('up').classList.toggle('active', s.output === 'up');
   $('down').classList.toggle('active', s.output === 'down');
 
@@ -265,6 +279,8 @@ function render(s) {
   }
   pb.querySelectorAll('button').forEach(b => b.disabled = !canMove || !s.presets_available);
   $('presetHint').hidden = s.presets_available;
+  $('presetHint').textContent = s.calibrated ? 'Presets are enabled in the next stage.' : 'Presets need calibration first (System tab).';
+  renderCal(s);
 
   if (lastErrSeq !== null && s.last_error_seq !== lastErrSeq && s.last_error) toast(s.last_error);
   lastErrSeq = s.last_error_seq;
@@ -310,9 +326,12 @@ async function loadConfig() {
     const r = document.createElement('div'); r.className = 'preset-row';
     r.innerHTML = `<input type="checkbox" aria-label="Enabled"><input aria-label="Name" maxlength="15"><input type="number" aria-label="Height mm">`;
     const [en, nm, mm] = r.children; en.checked = p.enabled; nm.value = p.name; mm.value = p.mm;
+    const chk = () => mm.classList.toggle('bad', en.checked && (Number(mm.value) < cfg.limits.min_mm || Number(mm.value) > cfg.limits.max_mm));
+    mm.oninput = en.onchange = chk; chk();
     rows.appendChild(r);
   });
-  $('presetRange').textContent = `Heights in mm, ${cfg.limits.min_mm}–${cfg.limits.max_mm}.`;
+  $('presetRange').textContent = `Heights in mm, ${cfg.limits.min_mm}–${cfg.limits.max_mm}` + (cfg.limits.calibrated ? ' (the calibrated range).' : ' (until calibrated).') +
+    ' Presets outside the range are outlined in red.';
   $('pwPrompt').hidden = !cfg.admin_prompt;
   $('pwState').textContent = cfg.admin_password_set ? 'A password protects Settings and System.' : 'No password set.';
   $('pwRemove').disabled = !cfg.admin_password_set;
@@ -451,6 +470,56 @@ $('sSave').onclick = async () => {
   } catch (e) { toast(e.message, 5000); }
 };
 
+/* ---- calibration ---- */
+async function calCmd(cmd, extra = {}) {
+  try { await putJSON('/api/cal', Object.assign({ cmd }, extra), 'POST'); } catch (e) { toast(e.message, 6000); }
+}
+let calPhase = 'none';
+function renderCal(s) {
+  const c = s.cal || { phase: 'none' }, p = $('calPanel');
+  p.hidden = c.phase === 'none';
+  if (c.phase !== calPhase && c.phase === 'enter_height') $('calMm').value = '';
+  calPhase = c.phase;
+  if (p.hidden) return;
+  const T = { need_budget: 'Calibration: waiting for motor time', prompt: 'Calibration', running: 'Calibrating…', enter_height: 'Calibration: bottom height',
+    summary: 'Calibration result', saved: 'Calibration saved', failed: 'Calibration failed', cancelled: 'Calibration cancelled' };
+  $('calTitle').textContent = T[c.phase] || 'Calibration';
+  p.className = 'card' + (c.phase === 'running' ? ' run' : c.phase === 'failed' ? ' bad' : '');
+  let text = c.text, prog = '';
+  if (c.phase === 'need_budget') prog = 'Starts in ' + fmtDur(c.wait_s) + ' (needs ' + c.need_s + ' s of motor time). You can leave this open.';
+  if (c.phase === 'prompt') text += ' The desk will run to the top and bottom on its own. STOP, or a touch on the desk screen, cancels.';
+  if (c.phase === 'running') prog = 'Step ' + c.step + ' of ' + c.steps + ' · ' + fmtDur(c.elapsed_s);
+  if (c.phase === 'failed') text += ' The old calibration is kept.';
+  if (c.phase === 'summary' && c.result) { const r = c.result;
+    const k = r.scale || 1, f = (v, d = 1) => (v * k).toFixed(d);
+    text = `Range ${r.h_min_mm}–${r.h_max_mm} mm (${r.h_max_mm - r.h_min_mm} mm of travel). Speed up ${f(r.speed_up_mm_s)} / down ${f(r.speed_down_mm_s)} mm/s. Coast up ${f(r.coast_up_mm, 0)} / down ${f(r.coast_down_mm, 0)} mm.`; }
+  $('calText').textContent = text; $('calProg').textContent = prog;
+  $('calEntry').hidden = c.phase !== 'enter_height';
+  const B = { need_budget: [['Close', 'close']], prompt: [['Start', 'start', 1], ['Cancel', 'cancel']], running: [['Cancel', 'cancel', 2]],
+    enter_height: [['Discard', 'discard']], summary: [['Save', 'save', 1], ['Discard', 'discard']], saved: [['OK', 'close']], failed: [['OK', 'close']], cancelled: [['OK', 'close']] }[c.phase] || [];
+  const key = c.phase; const bx = $('calBtns');
+  if (bx._k !== key) {
+    bx._k = key; bx.innerHTML = '';
+    B.forEach(([label, cmd, kind]) => { const b = document.createElement('button'); b.textContent = label; if (kind === 1) b.className = 'primary'; if (kind === 2) b.className = 'danger'; b.onclick = () => calCmd(cmd); bx.appendChild(b); });
+  }
+}
+$('calFixGo').onclick = async () => { const v = Number($('calFix').value); if (!v) return toast('Enter the height in mm');
+  try { await putJSON('/api/cal', { cmd: 'correct', mm: v }, 'POST'); toast('Height corrected'); $('calFix').value = ''; setTimeout(loadSystem, 400); } catch (e) { toast(e.message, 6000); } };
+$('calMmOk').onclick = () => { const v = Number($('calMm').value); if (!v) return toast('Enter the height in mm'); calCmd('height', { mm: v }); };
+$('calGo').onclick = async () => { await calCmd('begin'); showTab('control'); };
+$('calExport').onclick = async () => {
+  try { const c = await api('/api/calibration'); const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(c, null, 2)], { type: 'application/json' })); a.download = 'desk-calibration.json'; a.click();
+  } catch (e) { toast(e.message); }
+};
+$('calImportBtn').onclick = () => $('calImport').click();
+$('calImport').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { const c = JSON.parse(await f.text()); if (!confirm('Replace the current calibration with this file?')) return;
+    await putJSON('/api/calibration', c); toast('Calibration imported'); setTimeout(loadSystem, 500);
+  } catch (err) { toast('Import failed: ' + err.message, 6000); }
+};
+
 /* ---- system ---- */
 async function loadSystem() {
   const s = await api('/api/system');
@@ -461,6 +530,13 @@ async function loadSystem() {
     ['IP', s.ip || '—'], ['Setup AP', s.ap_active ? s.ap_ssid : 'off'], ['Clock', s.time_synced ? 'synced' : 'not synced'],
     ['Duty budget left', s.duty_remaining_s + ' s'], ['Last fault', s.last_fault || 'none'], ['Last reset', s.reset_reason],
   ];
+  try {
+    const c = await api('/api/calibration'); const when = c.timestamp ? ' on ' + new Date(c.timestamp * 1000).toLocaleString() : '';
+    const k = c.scale || 1, f = (v, d = 1) => (v * k).toFixed(d);
+    $('calInfo').textContent = `Calibrated${when}: ${c.h_min_mm}–${c.h_max_mm} mm, speed up ${f(c.speed_up_mm_s)} / down ${f(c.speed_down_mm_s)} mm/s, coast up ${f(c.coast_up_mm, 0)} / down ${f(c.coast_down_mm, 0)} mm, sensor scale ${k}.`;
+    $('calFixGo').disabled = false;
+    $('calExport').disabled = false;
+  } catch (e) { $('calInfo').textContent = 'Not calibrated: the height shows "--" and presets are off until it is.'; $('calExport').disabled = true; $('calFixGo').disabled = true; }
   const dl = $('sysInfo'); dl.innerHTML = '';
   rows.forEach(([k, v]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; dl.append(dt, dd); });
 }

@@ -28,10 +28,15 @@ by simulating handset UP/DOWN presses through PC817 optocouplers. The authoritat
 - **Stage 2 (real optos, hold-to-run): done and tested on the desk.** Source mode, active-high.
   The external 10 kΩ pull-downs are NOT fitted (Josh accepted the risk; no movement seen on
   reset/crash/flash).
-- **Stage 3 (VL53L0X raw readings): done and accepted on the desk.** Tracking and stillness pass
-  (README table). Hot-unplug test deferred by Josh until the wiring is permanent: run it after the
-  final stage. Waiting for Josh to say go before stage 4 (calibration).
-- Stages 4–6 not started.
+- **Stage 3 (VL53L0X raw readings): done and accepted on the desk.** Hot-unplug test deferred by
+  Josh until the wiring is permanent: run it after the final stage.
+- **Stage 4 (calibration): done and accepted on the desk** (display flow, touch cancel, Correct height
+  and a full run from the screen tested by Josh). Waiting for Josh to say go before stage 5 (presets).
+  Calibrated 2026-11-06: 725-1171 mm, scale 0.931 (tape: 725 bottom, 954 mid, 1163 top). Routine order differs from the spec to fit the
+  duty budget; "Correct height" (scale factor) is an addition (README "Calibration").
+- Reflashing restarts the duty ledger's expiry (up to 20 min before budget frees up): plan motor tests
+  around flashes.
+- Stages 5–6 not started.
 - Firmware really moves the desk. Josh has said it is safe for Claude to drive it (2026-11-06): the
   control box stops by itself at both end stops. Jog over the WebSocket (`jog` + `hb` every 100 ms,
   then `stop`). Keep the heartbeat in its own task: a blocking HTTP/mDNS call in the same loop starves
@@ -78,7 +83,8 @@ components/jd9853     esp_lcd panel driver (init sequence from Waveshare demo)
 components/axs5106    esp_lcd_touch driver
 components/vl53l0x    VL53L0X driver (Pololu port), non-blocking sample reads
 components/height     sensor task: filter (median 5 + EMA), 60 s history, offline/back-off re-init
-components/motion     motion state machine + safety invariants + duty ledger (duty.c); simulator in stages 0-1
+components/motion     calib.c = calibration routine (runs in the motion task);
+                      motion state machine + safety invariants + duty ledger (duty.c); simulator in stages 0-1
 components/config     typed settings blob in NVS (versioned), admin password (PBKDF2), listeners
 components/net        Wi-Fi STA + setup AP fallback, captive DNS (dns_captive.c), mDNS, SNTP
 components/web        httpd: page + WebSocket (web.c), REST API + OTA (web_api.c)

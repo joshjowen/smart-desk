@@ -4,9 +4,9 @@ ESP-IDF firmware for a Waveshare ESP32-C6-Touch-LCD-1.47 that drives an Otto Cha
 simulating handset button presses through PC817 optocouplers. The full plan is in
 [desk-controller-spec.md](desk-controller-spec.md); progress is in [CHANGELOG.md](CHANGELOG.md).
 
-**Current stage: 3 (real desk, hold-to-run only; height sensor readings shown but not used yet).** The
-optos are driven in source mode (GPIO high = button pressed). The VL53L0X readings are raw distances;
-presets stay disabled until the sensor is calibrated (stage 4).
+**Current stage: 4 (calibration; real desktop height shown, hold-to-run only).** The optos are driven
+in source mode (GPIO high = button pressed). After calibration the display and web show the desktop
+height; presets are enabled in stage 5.
 
 ## Build and flash
 
@@ -57,7 +57,7 @@ Factory reset (System tab) erases all settings.
   bad samples in red), a stillness summary over the last 10 s, CSV download of the last 60 s, and the
   ranging profile (default 50 ms / high accuracy 200 ms) and filter alpha. `GET /api/sensor?since=<n>`
   and `GET /api/sensor.csv` give the same data to scripts.
-- **System**: firmware and network info, last fault, duty budget, reboot, factory reset, firmware
+- **System**: calibration (start the routine, export / import it as JSON), firmware and network info, last fault, duty budget, reboot, factory reset, firmware
   update (upload `build/smart_desk.bin`; a firmware that fails to start rolls back automatically).
 
 The clock is set by NTP: first a server offered by DHCP, then the **Time server** setting (blank means
@@ -73,6 +73,8 @@ the router/gateway), then pool.ntp.org. It is only used for log timestamps.
   wakes it.
 - The line under the height shows the sensor's filtered distance ("sensor 80 mm (uncalibrated)"), or
   "sensor offline".
+- The gear button (control screen) opens **Settings**: calibration status, **Calibrate desk**, and
+  **Sensor details**.
 - **Long-press the status row** (top of the screen) for the sensor debug screen: filtered and raw mm,
   range status, rate, standard deviation and span over 2 s, signal / ambient rate, profile, alpha and
   error counts. Back returns; it also times out (auto-lock time if opened unlocked, 5 min if locked).
@@ -88,6 +90,7 @@ The board's USB port gives a `desk>` prompt (e.g. through `idf.py monitor`):
 | `stop` | Stop any movement |
 | `goto <mm>` | Seek to a height |
 | `sensor` | Height sensor readings, noise, profile and error counts |
+| `cal` | Calibration status; `cal begin`, `cal start`, `cal height <mm>`, `cal save`, `cal discard`, `cal cancel`, `cal close`, `cal correct <mm>` |
 | `scan` | I2C bus scan |
 | `time` | Clock and NTP server status |
 | `fault [text]` | Debug: raise a fault (test the fault screen) |
@@ -149,6 +152,56 @@ All within ±5 mm filtered (worst ±3 mm at the top, where the return signal is 
 samples in any window. The reading rises as the desk goes up: about 480 mm of travel at ~15.5 mm/s
 in both directions, so a full end-to-end run takes ~31 s, longer than the 25 s uncalibrated max move
 time (stage 4 must allow for that).
+
+## Calibration (stage 4)
+
+Start it from the display (gear > Calibrate desk) or the web System tab (the desk display must be
+unlocked). It checks there is at least `DESK_CAL_MOTOR_S` (90 s) of motor time left; if not it shows
+how long to wait and opens the start prompt by itself once there is. Then, after "Clear the area ...
+Start":
+
+1. Probe: UP until the reading moves 20 mm (2-3 s); that gives the sign. If the desk is already at the
+   top it probes DOWN instead. No change either way: "Sensor not seeing the target".
+2. UP to the top stop (reading changes < 2 mm over 1 s while driven): `raw_max`.
+3. Two coast tests DOWN: 3 s run, release, wait for the reading to settle.
+4. DOWN to the bottom stop: `raw_min`.
+5. Two coast tests UP.
+6. Back DOWN to the bottom stop; the bottom reading must repeat within 15 mm.
+7. Enter the desktop height measured from the floor at the bottom (on-screen keypad or the web form).
+8. Summary, then Save or Discard.
+
+Height model: `height = h_min + sign × scale × (reading − raw_min)`. Usable range is `h_min + 5` to
+`h_max − 5` mm. Max single move time becomes travel / slowest speed × 1.3 (39 s on this desk).
+Coasts are measured on the filtered reading, from release to the settled value.
+
+Differences from the spec, both because a full run on this desk takes ~31 s:
+
+- Order: the spec goes bottom → top → bottom → coast tests, which needs ~105 s of motor time (close
+  to the 120 s budget) and over 2 minutes of wall time. The order above needs at most ~75 s and runs
+  in ~80 s.
+- Long runs are split into segments of at most 20 s with a 1 s pause, so no single move gets near the
+  25 s uncalibrated max move time (that limit is unchanged).
+
+A touch anywhere on the screen, STOP (web, console, handset if sensed) or Cancel stops the desk at
+once and keeps the old calibration. The routine also stops on a fault, when the motor budget runs out,
+if the sensor reading is lost, or after 3 minutes. Calibration is stored in NVS (`cal` key, with a
+version and timestamp) and erased by a factory reset. Export / import: `GET` / `PUT /api/calibration`.
+
+**Correct height** (display: gear > Correct height; web: System > Calibration; console `cal correct <mm>`):
+tape-measure the desk where it is and enter it. At least 150 mm above the bottom it sets `scale`
+(keeping `h_min`); nearer the bottom it corrects `h_min`. The desk does not move. This is an addition
+to the spec, which maps the sensor with one tape measurement only: on this desk the VL53L0X reads
+distances about 7 % long (a cosine error from the mounting angle has the same effect), which puts the
+top ~35 mm out with `scale` = 1. The scale is kept when the routine is run again.
+
+Measured on this desk (2026-11-06): sensor travel 478 mm (52.3 → 530.6), 15.8 mm/s up, 16.0 mm/s
+down, coast about 11 mm each way (sensor mm), bottom repeats within 0.1 mm, top within 0.1 mm,
+routine 78 s. Tape measure: 725 mm at the bottom, 954 mid, 1163 near the top. A straight-line fit through
+those points gives `scale` 0.931, so the desk is 725-1170 mm; displayed vs tape after the correction:
+725 / 725, 953 / 954, 1163 / 1163.
+
+Cancel tests: web STOP while heading for the top, and web Cancel during a coast test: output off
+within 1 ms, old calibration unchanged.
 
 ## Wiring
 

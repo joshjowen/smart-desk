@@ -8,6 +8,7 @@
  *   5  duty-cycle ledger (RTC memory) -> refuse seeks / COOLDOWN
  *   7  STOP from any source wins
  *   9  task watchdog on this task
+ * Calibration (stage 4) runs inside this task through calib.c.
  */
 #include "motion.h"
 
@@ -25,6 +26,8 @@
 #include "driver/gpio.h"
 #include "duty.h"
 #include "opto.h"
+#include "calib.h"
+#include "height.h"
 
 static const char *TAG = "motion";
 
@@ -97,12 +100,15 @@ static bool height_read(int32_t *mm)
     return true;
 }
 #else
-/* Real desk through the optos. No height sensor until stage 3 / calibration in
- * stage 4: height is unknown and only hold-to-run jogging is possible. The range
- * is only used to sanity-check preset values entered in the settings. */
-static const int32_t s_min_mm = 500;
-static const int32_t s_max_mm = 1400;
-static const bool s_calibrated = false;
+/* Real desk through the optos, height from the VL53L0X through the calibration.
+ * Until calibrated, height is unknown and only hold-to-run jogging is possible;
+ * the range is then only used to sanity-check preset values in the settings. */
+#define UNCAL_MIN_MM 500
+#define UNCAL_MAX_MM 1400
+static volatile int32_t s_min_mm = UNCAL_MIN_MM;
+static volatile int32_t s_max_mm = UNCAL_MAX_MM;
+static bool s_calibrated = false;
+static motion_cal_t s_cal;
 
 static void hw_set(motion_dir_t d)
 {
@@ -116,8 +122,24 @@ static void hw_tick(uint32_t dt_ms)
 static bool height_read(int32_t *mm)
 {
     *mm = 0;
-    return false;
+    if (!s_calibrated) {
+        return false;
+    }
+    height_status_t h;
+    height_get(&h);
+    if (!h.valid) {
+        return false;
+    }
+    *mm = (int32_t)lroundf(s_cal.h_min_mm + s_cal.sign * s_cal.scale * (h.filtered_mm - s_cal.raw_min));
+    return true;
 }
+#endif
+
+/* Presets / seeks are enabled in stage 5. */
+#if CONFIG_DESK_SIMULATOR
+#define SEEKS_ENABLED 1
+#else
+#define SEEKS_ENABLED 0
 #endif
 
 /* ---- optional handset sense ---- */
@@ -142,7 +164,13 @@ static void handset_init(void)
 static void handle(const motion_req_t *r);
 static void enter_fault(const char *text);
 
-static const int64_t s_max_move_us = (int64_t)CONFIG_DESK_MAX_MOVE_S_UNCAL * 1000000;
+/* Invariant 4: fixed before calibration, travel / slowest speed x 1.3 after. */
+static int64_t s_max_move_us = (int64_t)CONFIG_DESK_MAX_MOVE_S_UNCAL * 1000000;
+
+static void (*s_cal_saved_cb)(const motion_cal_t *c);
+static portMUX_TYPE s_cal_lock = portMUX_INITIALIZER_UNLOCKED;
+static motion_cal_t s_pending_cal;
+static bool s_pending;
 
 /* ---- helpers ---- */
 
@@ -207,6 +235,7 @@ static void apply_output(motion_dir_t want, const char *reason)
 
 static void enter_fault(const char *text)
 {
+    calib_abort(text, false);
     apply_output(MOTION_DIR_NONE, "fault");
     strlcpy(s_fault, text, sizeof(s_fault));
     strlcpy(s_last_fault, text, sizeof(s_last_fault));
@@ -225,7 +254,9 @@ static void start_seek(const motion_req_t *r, int32_t target)
     int32_t h;
     if (s_state == MOTION_FAULT) { reject(r, "Fault: acknowledge first"); return; }
     if (s_state == MOTION_COOLDOWN) { reject(r, "Cooling down"); return; }
+    if (calib_blocks_moves()) { reject(r, "Finish or cancel calibration first"); return; }
     if (!s_calibrated) { reject(r, "Needs calibration"); return; }
+    if (!SEEKS_ENABLED) { reject(r, "Presets arrive in stage 5"); return; }
     if (!height_read(&h)) { reject(r, "Height sensor invalid"); return; }
     if (target < s_min_mm || target > s_max_mm) { reject(r, "Target out of range"); return; }
     if (duty_remaining_ms() < SEEK_MIN_BUDGET_MS) { reject(r, "Duty budget low"); return; }
@@ -243,11 +274,49 @@ static void start_seek(const motion_req_t *r, int32_t target)
     ESP_LOGI(TAG, "seek %ld -> %ld mm src=%s", (long)h, (long)target, motion_source_name(r->source));
 }
 
+static void apply_calibration(const motion_cal_t *c);
+
+/* A tape-measured height at the current position. Far enough from the bottom it
+ * corrects the scale (keeping h_min); near the bottom it corrects h_min. */
+#define CORRECT_MIN_SPAN_MM 150
+static void correct_height(const motion_req_t *r)
+{
+#if CONFIG_DESK_SIMULATOR
+    reject(r, "No calibration on the simulated desk");
+#else
+    if (!s_calibrated) { reject(r, "Calibrate first"); return; }
+    if (moving_state() || calib_blocks_moves()) { reject(r, "Wait until the desk is still"); return; }
+    height_status_t h;
+    height_get(&h);
+    if (!h.valid) { reject(r, "Height sensor invalid"); return; }
+    motion_cal_t c = s_cal;
+    float d = c.sign * (h.filtered_mm - c.raw_min);   /* sensor mm above the bottom */
+    if (d >= CORRECT_MIN_SPAN_MM) {
+        float k = (r->value - c.h_min_mm) / d;
+        if (!(k >= 0.5f && k <= 1.5f)) { reject(r, "That height doesn't fit the calibration"); return; }
+        ESP_LOGI(TAG, "height correction at %.1f mm above the bottom: scale %.4f -> %.4f", d, c.scale, k);
+        c.scale = k;
+    } else {
+        int32_t hmin = (int32_t)lroundf(r->value - c.scale * d);
+        if (hmin < 300 || hmin > 1500) { reject(r, "That height doesn't fit the calibration"); return; }
+        ESP_LOGI(TAG, "height correction near the bottom: h_min %ld -> %ld mm", (long)c.h_min_mm, (long)hmin);
+        c.h_min_mm = hmin;
+    }
+    apply_calibration(&c);
+    if (s_cal_saved_cb) {
+        s_cal_saved_cb(&s_cal);
+    }
+#endif
+}
+
 static void handle(const motion_req_t *r)
 {
     int64_t now = esp_timer_get_time();
     switch ((int)r->type) {
     case MOTION_REQ_STOP:
+        if (s_state == MOTION_CALIBRATING) {
+            calib_abort("Calibration cancelled. The old calibration is kept.", true);
+        }
         if (moving_state()) {
             s_src = r->source;
             apply_output(MOTION_DIR_NONE, "stop request");
@@ -260,7 +329,7 @@ static void handle(const motion_req_t *r)
         motion_dir_t d = r->type == MOTION_REQ_JOG_UP ? MOTION_DIR_UP : MOTION_DIR_DOWN;
         if (s_state == MOTION_FAULT) { reject(r, "Fault: acknowledge first"); break; }
         if (s_state == MOTION_COOLDOWN) { reject(r, "Cooling down"); break; }
-        if (s_state == MOTION_CALIBRATING) { reject(r, "Calibrating"); break; }
+        if (s_state == MOTION_CALIBRATING || calib_blocks_moves()) { reject(r, "Finish or cancel calibration first"); break; }
         if (s_state != MOTION_JOG || s_jog_dir != d || s_src != r->source) {
             ESP_LOGI(TAG, "jog %s src=%s", dir_name(d), motion_source_name(r->source));
         }
@@ -297,9 +366,37 @@ static void handle(const motion_req_t *r)
     }
         break;
 
-    case MOTION_REQ_CALIBRATE:
-        reject(r, "Calibration arrives in stage 4");
+    case MOTION_REQ_CALIBRATE: {
+#if CONFIG_DESK_SIMULATOR
+        reject(r, "No calibration on the simulated desk");
+#else
+        motion_cal_cmd_t cmd = (motion_cal_cmd_t)r->value;
+        if (cmd == MOTION_CAL_START && (s_state == MOTION_FAULT || s_state == MOTION_COOLDOWN)) {
+            reject(r, s_state == MOTION_FAULT ? "Fault: acknowledge first" : "Cooling down");
+            break;
+        }
+        const char *err = calib_cmd(cmd, s_state == MOTION_IDLE, duty_remaining_ms());
+        if (err) {
+            reject(r, err);
+        } else if (calib_running() && s_state != MOTION_CALIBRATING) {
+            s_src = r->source;
+            set_state(MOTION_CALIBRATING, "calibration started");
+        }
+#endif
         break;
+    }
+
+    case MOTION_REQ_CAL_CORRECT:
+        correct_height(r);
+        break;
+
+    case MOTION_REQ_CAL_HEIGHT: {
+        const char *err = calib_set_height(r->value);
+        if (err) {
+            reject(r, err);
+        }
+        break;
+    }
 
     case MOTION_REQ_CLEAR_FAULT:
         if (s_state == MOTION_FAULT) {
@@ -348,6 +445,75 @@ static void process_queue(void)
     }
 }
 
+const char *motion_cal_check(const motion_cal_t *c)
+{
+    if (c->version != 1 && c->version != MOTION_CAL_VERSION) return "Unsupported calibration version";
+    if (c->version >= 2 && !(c->scale >= 0.5f && c->scale <= 1.5f)) return "Scale must be 0.5-1.5";
+    if (c->sign != 1 && c->sign != -1) return "Sign must be +1 or -1";
+    if (!(c->raw_min >= 0 && c->raw_min <= 2000 && c->raw_max >= 0 && c->raw_max <= 2000)) return "Raw readings out of range";
+    if (c->sign * (c->raw_max - c->raw_min) < 100) return "Travel under 100 mm";
+    if (c->h_min_mm < 300 || c->h_min_mm > 1500) return "Bottom height must be 300-1500 mm";
+    if (!(c->speed_up >= 3 && c->speed_up <= 100 && c->speed_down >= 3 && c->speed_down <= 100)) return "Speeds must be 3-100 mm/s";
+    if (!(c->coast_up >= 0 && c->coast_up <= 100 && c->coast_down >= 0 && c->coast_down <= 100)) return "Coasts must be 0-100 mm";
+    return NULL;
+}
+
+static void apply_calibration(const motion_cal_t *c)
+{
+#if CONFIG_DESK_SIMULATOR
+    (void)c;
+#else
+    if (!c->valid || motion_cal_check(c)) {
+        s_calibrated = false;
+        s_min_mm = UNCAL_MIN_MM;
+        s_max_mm = UNCAL_MAX_MM;
+        s_max_move_us = (int64_t)CONFIG_DESK_MAX_MOVE_S_UNCAL * 1000000;
+        ESP_LOGW(TAG, "no valid calibration: hold-to-run only");
+        return;
+    }
+    s_cal = *c;
+    if (s_cal.version < 2) {
+        s_cal.version = MOTION_CAL_VERSION;
+        s_cal.scale = 1.0f;
+    }
+    c = &s_cal;
+    calib_set_scale(c->scale);
+    float travel = c->sign * (c->raw_max - c->raw_min);   /* sensor mm */
+    int32_t h_max = (int32_t)lroundf(c->h_min_mm + c->scale * travel);
+    s_min_mm = c->h_min_mm + END_STOP_MARGIN_MM;
+    s_max_mm = h_max - END_STOP_MARGIN_MM;
+    float slow = fminf(c->speed_up, c->speed_down);
+    s_max_move_us = (int64_t)(travel / slow * 1.3f * 1000000);
+    s_calibrated = true;
+    ESP_LOGI(TAG, "calibration: %ld-%ld mm (usable %ld-%ld), scale %.4f, speed up %.1f down %.1f mm/s, coast up %.1f "
+             "down %.1f mm, max move %.1f s", (long)c->h_min_mm, (long)h_max, (long)s_min_mm, (long)s_max_mm, c->scale,
+             c->speed_up * c->scale, c->speed_down * c->scale, c->coast_up * c->scale, c->coast_down * c->scale,
+             s_max_move_us / 1e6);
+#endif
+}
+
+esp_err_t motion_set_calibration(const motion_cal_t *c)
+{
+    if (moving_state() || calib_blocks_moves()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    portENTER_CRITICAL(&s_cal_lock);
+    s_pending_cal = *c;
+    s_pending = true;
+    portEXIT_CRITICAL(&s_cal_lock);
+    return ESP_OK;
+}
+
+void motion_load_calibration(const motion_cal_t *c)
+{
+    apply_calibration(c);
+}
+
+void motion_set_cal_saved_cb(void (*cb)(const motion_cal_t *c))
+{
+    s_cal_saved_cb = cb;
+}
+
 static void step(uint32_t dt_ms)
 {
     int64_t now = esp_timer_get_time();
@@ -394,6 +560,7 @@ static void step(uint32_t dt_ms)
     /* Invariant 5: duty budget. */
     uint32_t rem = duty_remaining_ms();
     if (rem == 0 && s_state != MOTION_COOLDOWN && s_state != MOTION_FAULT) {
+        calib_abort("Motor time ran out. Calibration stopped; try again after the cooldown.", false);
         apply_output(MOTION_DIR_NONE, "duty budget used");
         set_state(MOTION_COOLDOWN, "duty budget used");
     } else if (s_state == MOTION_COOLDOWN && rem >= COOLDOWN_EXIT_MS) {
@@ -430,6 +597,13 @@ static void step(uint32_t dt_ms)
         }
         break;
     }
+    case MOTION_CALIBRATING:
+        want = calib_tick(now, s_out);
+        if (!calib_running()) {
+            apply_output(MOTION_DIR_NONE, "calibration ended");
+            set_state(MOTION_IDLE, "calibration ended");
+        }
+        break;
     case MOTION_SETTLE:
         if (now >= s_settle_until_us) {
             ESP_LOGI(TAG, "seek done: %ld mm (target %ld, error %+ld)", (long)h, (long)s_target_mm,
@@ -440,7 +614,25 @@ static void step(uint32_t dt_ms)
     default:
         break;
     }
-    apply_output(want, s_state == MOTION_JOG ? "jog" : s_state == MOTION_SEEK ? "seek" : "idle");
+    apply_output(want, s_state == MOTION_JOG ? "jog" : s_state == MOTION_SEEK ? "seek" :
+                       s_state == MOTION_CALIBRATING ? "calibrate" : "idle");
+
+    calib_idle_tick(now, 0);
+    motion_cal_t nc;
+    bool apply_new = calib_take_saved(&nc);
+    if (!apply_new && s_pending && !moving_state() && !calib_blocks_moves()) {
+        portENTER_CRITICAL(&s_cal_lock);
+        nc = s_pending_cal;
+        s_pending = false;
+        portEXIT_CRITICAL(&s_cal_lock);
+        apply_new = true;
+    }
+    if (apply_new) {
+        apply_calibration(&nc);
+        if (s_cal_saved_cb) {
+            s_cal_saved_cb(&nc);
+        }
+    }
 
     motion_status_t st = {
         .state = s_state,
@@ -449,7 +641,9 @@ static void step(uint32_t dt_ms)
         .height_valid = h_ok,
         .height_mm = h,
         .target_mm = (s_state == MOTION_SEEK || s_state == MOTION_SETTLE) ? s_target_mm : 0,
-        .presets_available = s_calibrated,
+        .presets_available = s_calibrated && SEEKS_ENABLED,
+        .calibrated = s_calibrated,
+        .max_move_s = (uint32_t)(s_max_move_us / 1000000),
         .min_mm = s_min_mm,
         .max_mm = s_max_mm,
         .duty_remaining_s = rem / 1000,
@@ -462,6 +656,10 @@ static void step(uint32_t dt_ms)
     strlcpy(st.last_fault, s_last_fault, sizeof(st.last_fault));
     strlcpy(st.fault, s_state == MOTION_FAULT ? s_fault : "", sizeof(st.fault));
     strlcpy(st.last_error, s_last_error, sizeof(st.last_error));
+#if !CONFIG_DESK_SIMULATOR
+    st.cal = s_cal;
+#endif
+    calib_get_status(&st.cal_session);
     portENTER_CRITICAL(&s_lock);
     s_pub = st;
     portEXIT_CRITICAL(&s_lock);
@@ -497,7 +695,7 @@ esp_err_t motion_init(void)
 #if CONFIG_DESK_SIMULATOR
     ESP_LOGW(TAG, "SIMULATED desk: real outputs held off");
 #else
-    ESP_LOGW(TAG, "REAL desk: hold-to-run only, max move %d s, no height sensor", CONFIG_DESK_MAX_MOVE_S_UNCAL);
+    ESP_LOGW(TAG, "REAL desk: outputs on GPIO, height from the VL53L0X via calibration");
 #endif
 #if CONFIG_DESK_HANDSET_SENSE
     handset_init();
