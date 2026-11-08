@@ -277,6 +277,26 @@ remote moves off nothing moves and Last error explains why; reconnects after a r
 
 ## Wiring
 
+![Wiring diagram](docs/wiring.svg)
+
+The two optocouplers sit in parallel with the original handset's UP and DOWN buttons, so the handset
+keeps working and the desk control box still drives the motor. The ESP32 runs off a buck converter
+fed from the desk's own 29 V supply, so everything shares one ground.
+
+Parts:
+
+- Waveshare ESP32-C6-Touch-LCD-1.47
+- 2-channel PC817 optocoupler module (terminal names vary by module: inputs I1/I2 or IN1/IN2,
+  outputs V1/V2 or U1/U2)
+- VL53L0X time-of-flight breakout, mounted at the top of the leg column looking down, so the reading
+  changes with desk height
+- Buck converter, 29 V to 5 V, rated for 36 V input or more
+- Y-split barrel lead for the 29 V supply (the stock supply here is a GRP-30W, 29 V 1 A)
+- 2 × 10 kΩ resistors for the GPIO pull-downs (recommended; see the note in the table)
+
+Handset cable (4 pins): UP, GND, NC, DOWN. Tap the UP, DOWN and GND lines between the handset and the
+control box. A button press pulls its line to GND; the opto output does the same.
+
 Pin numbers come from [main/board_config.h](main/board_config.h).
 
 | From | To | Notes |
@@ -298,6 +318,11 @@ pull-down. GPIO3 is also the TF-card MISO line; the TF card is never used and it
 
 I2C devices found at boot: 0x29 (VL53L0X), 0x63 (AXS5106L touch), 0x6b (QMI8658 IMU, unused).
 
+## Case
+
+[hardware/smart-desk-case.stl](hardware/smart-desk-case.stl) is a 3D-printable case that holds the
+ESP32 board and the other components (GitHub shows a 3D preview when you open the file).
+
 ## Layout
 
 ```
@@ -316,4 +341,6 @@ components/
   web/           HTTP server, REST API, WebSocket, OTA
 web/index.html   the web app (gzipped into the firmware at build time)
 tools/serlog.py  serial log capture for scripts
+docs/wiring.svg  wiring diagram
+hardware/        3D-printable case (STL)
 ```
